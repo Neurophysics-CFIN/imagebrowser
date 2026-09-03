@@ -1,4 +1,4 @@
-function varargout = imagebrowser2(varargin)
+function varargout = ib(varargin)
 %IMAGEBROWSER2  Browse series of images, define ROIs and plot signal curves.
 %
 %   IMAGEBROWSER2(DATA) opens the browser on DATA.  Dimensions 1 and 2 are
