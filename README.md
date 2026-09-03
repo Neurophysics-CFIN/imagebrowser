@@ -11,7 +11,7 @@ volumes appears in a docked plot. If your x-axis is b-values, it will fit DTI or
 DKI to that curve.
 
 ```matlab
-ib(vol,'Xdata',unique(bs),,Xlabel='b [ms/\mum^2]',DimNames=["b-value","dir"])
+ib(vol,'XData',unique(bs),XLabel='b [ms/\mum^2]',DimNames=["b-value","dir"])
 ```
 
 <!-- SCREENSHOT: the main window with a 4-D dataset loaded, a ROI drawn, and the

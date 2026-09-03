@@ -1,47 +1,47 @@
 classdef ImageBrowserApp < handle
-%IMAGEBROWSERAPP  Interactive browser for series of images (MRI and general).
-%
-%   Modern replacement for the GUIDE-era IMAGEBROWSER.  Use the wrapper
-%   function IMAGEBROWSER2 to launch it; this class can also be constructed
-%   directly:
-%
-%       app = ImageBrowserApp(DATA)
-%       app = ImageBrowserApp(DATA, Name=Value, ...)
-%
-%   DATA may be
-%     * a numeric or logical array of any dimensionality.  Dimensions 1 and
-%       2 are the image; dimensions 3..N are navigable (slice, volume, ...).
-%     * a cell array, in which case each element becomes its own series.
-%     * a struct, in which case each field becomes its own series named
-%       after the field.
-%
-%   Name-value options
-%     Name        (string)  window title
-%     SeriesNames (string array or cellstr) names for the supplied series
-%     DimNames    (string array) names for the navigable dimensions
-%     Colormap    (char/string/Mx3) initial colormap, default "gray"
-%     CLim        (1x2) initial colour limits
-%     XData       (vector) x-axis values for the signal plot, e.g. b-values
-%     XLabel      (string) x-axis label for the signal plot
-%     Overlay     (array)  second dataset displayed on top with alpha blending
-%     ROI         (logical) initial ROI mask, 2-D or matching the frame count
-%     Theme       "system" | "light" | "dark"
-%     RGB         (logical) interpret dimension 3 as colour, default auto
-%
-%   Keyboard
-%     Left/Right      previous / next frame          Space   play / pause cine
-%     PageUp/PageDown +/- 10 frames                  Home/End first / last frame
-%     Up/Down         previous / next series         C       toggle colorbar
-%     +/-             more / less contrast           L       lock colour limits
-%     R               reset colour limits            M       toggle montage
-%     Scroll wheel    change frame            Ctrl+scroll     zoom about cursor
-%     Right-drag      window/level (brightness/contrast)
-%
-%   See also IMAGEBROWSER2.
+    %IMAGEBROWSERAPP  Interactive browser for series of images (MRI and general).
+    %
+    %   Modern replacement for the GUIDE-era IMAGEBROWSER.  Use the wrapper
+    %   function IMAGEBROWSER2 to launch it; this class can also be constructed
+    %   directly:
+    %
+    %       app = ImageBrowserApp(DATA)
+    %       app = ImageBrowserApp(DATA, Name=Value, ...)
+    %
+    %   DATA may be
+    %     * a numeric or logical array of any dimensionality.  Dimensions 1 and
+    %       2 are the image; dimensions 3..N are navigable (slice, volume, ...).
+    %     * a cell array, in which case each element becomes its own series.
+    %     * a struct, in which case each field becomes its own series named
+    %       after the field.
+    %
+    %   Name-value options
+    %     Name        (string)  window title
+    %     SeriesNames (string array or cellstr) names for the supplied series
+    %     DimNames    (string array) names for the navigable dimensions
+    %     Colormap    (char/string/Mx3) initial colormap, default "gray"
+    %     CLim        (1x2) initial colour limits
+    %     XData       (vector) x-axis values for the signal plot, e.g. b-values
+    %     XLabel      (string) x-axis label for the signal plot
+    %     Overlay     (array)  second dataset displayed on top with alpha blending
+    %     ROI         (logical) initial ROI mask, 2-D or matching the frame count
+    %     Theme       "system" | "light" | "dark"
+    %     RGB         (logical) interpret dimension 3 as colour, default auto
+    %
+    %   Keyboard
+    %     Left/Right      previous / next frame          Space   play / pause cine
+    %     PageUp/PageDown +/- 10 frames                  Home/End first / last frame
+    %     Up/Down         previous / next series         C       toggle colorbar
+    %     +/-             more / less contrast           L       lock colour limits
+    %     R               reset colour limits            M       toggle montage
+    %     Scroll wheel    change frame            Ctrl+scroll     zoom about cursor
+    %     Right-drag      window/level (brightness/contrast)
+    %
+    %   See also IMAGEBROWSER2.
 
-%   Written as a from-scratch modernisation of imagebrowser.m
-%   (Daniel Otykier et al.).  Requires R2023b or newer; the ROI drawing
-%   tools additionally require Image Processing Toolbox.
+    %   Written as a from-scratch modernisation of imagebrowser.m
+    %   (Daniel Otykier et al.).  Requires R2023b or newer; the ROI drawing
+    %   tools additionally require Image Processing Toolbox.
 
     %======================================================================
     % Public state
@@ -70,7 +70,7 @@ classdef ImageBrowserApp < handle
     properties (Access = private)
         UI          struct = struct()   % all graphics handles
         Overlay     struct = struct('Data',[],'CLim',[0 1],'Colormap',"hot", ...
-                                    'Alpha',0.5,'Threshold',-Inf,'Enabled',false)
+            'Alpha',0.5,'Threshold',-Inf,'Enabled',false)
         CLimStore   (1,2) double = [0 1]
         CLimLock    (1,1) logical = false
         CLimMode    (1,1) string  = "minmax"   % "minmax" | "robust" | "manual"
@@ -134,9 +134,6 @@ classdef ImageBrowserApp < handle
             app.ThemeChoice = opts.Theme;
             app.XData  = opts.XData;
             app.XLabel = opts.XLabel;
-            if ischar(opts.Colormap) || isstring(opts.Colormap)
-                app.CmapName = string(opts.Colormap);
-            end
 
             app.buildUI(opts.Name);
 
@@ -163,6 +160,10 @@ classdef ImageBrowserApp < handle
             if ~isempty(opts.CLim)
                 app.CLimMode = "manual";
                 app.setCLim(opts.CLim);
+            end
+            app.setXLabel(opts.XLabel);
+            if ischar(opts.Colormap) || isstring(opts.Colormap)
+                app.setColormap(opts.Colormap);
             end
             app.applyTheme();
             app.UI.Fig.Visible = "on";
@@ -291,7 +292,7 @@ classdef ImageBrowserApp < handle
                 Minv(i) = s.Min; Maxv(i) = s.Max;  Median(i) = s.Median;
             end
             T = table(Series, SeriesName, Frame, Name, Shape, Npix, Mean, SD, ...
-                      Minv, Maxv, Median);
+                Minv, Maxv, Median);
             T.Properties.VariableNames{9}  = 'Min';
             T.Properties.VariableNames{10} = 'Max';
         end
@@ -885,19 +886,19 @@ classdef ImageBrowserApp < handle
             dd = uidropdown(g, 'Items', {'DTI  S0 exp(-bD)', 'DKI  + b^2D^2K/6'}, ...
                 'ItemsData', {'DTI', 'DKI'}, 'Value', 'DKI', ...
                 'Tooltip', ['DTI is the special case K = 0. The x-axis must hold ' ...
-                            'b-values for the parameters to mean anything.']);
+                'b-values for the parameters to mean anything.']);
             dd.Layout.Row = 13; dd.Layout.Column = 2;
             app.UI.FitModelDrop = dd;
 
             c = uicheckbox(g, 'Text', 'Weight log stage by S^2', 'Value', true, ...
                 'Tooltip', ['Taking logs makes the noise heteroscedastic; weights ' ...
-                            'proportional to S^2 undo that to first order.']);
+                'proportional to S^2 undo that to first order.']);
             c.Layout.Row = 14; c.Layout.Column = [1 2];
             app.UI.FitWeighted = c;
 
             c = uicheckbox(g, 'Text', 'Refine by nonlinear least squares', 'Value', true, ...
                 'Tooltip', ['lsqcurvefit with an analytic Jacobian, started from the ' ...
-                            'log-linear estimate.']);
+                'log-linear estimate.']);
             c.Layout.Row = 15; c.Layout.Column = [1 2];
             app.UI.FitRefine = c;
 
@@ -945,13 +946,13 @@ classdef ImageBrowserApp < handle
 
         function s = emptySeries()
             s = struct('Name', {}, 'Data', {}, 'IsRGB', {}, ...
-                       'NavDims', {}, 'NavSize', {}, 'DimNames', {});
+                'NavDims', {}, 'NavSize', {}, 'DimNames', {});
             s = reshape(s, 1, 0);
         end
 
         function r = emptyROI()
             r = struct('Series', {}, 'Frame', {}, 'Name', {}, 'Shape', {}, ...
-                       'Pos', {}, 'Mask', {}, 'Color', {}, 'Visible', {});
+                'Pos', {}, 'Mask', {}, 'Color', {}, 'Visible', {});
             r = reshape(r, 1, 0);
         end
 
@@ -1021,13 +1022,13 @@ classdef ImageBrowserApp < handle
             if numel(navDims) >= 1, dimNames(1) = "slice";  end
             if numel(navDims) >= 2, dimNames(2) = "volume"; end
             s = struct('Name', string(name), 'Data', {data}, 'IsRGB', rgb, ...
-                       'NavDims', navDims, 'NavSize', navSize, 'DimNames', dimNames);
+                'NavDims', navDims, 'NavSize', navSize, 'DimNames', dimNames);
         end
 
         function nm = colormapNames()
             cand = ["gray" "bone" "pink" "copper" "parula" "turbo" "sky" "abyss" ...
-                    "jet" "hot" "hsv" "cool" "spring" "summer" "autumn" "winter" ...
-                    "lines" "colorcube" "prism" "flag" "white"];
+                "jet" "hot" "hsv" "cool" "spring" "summer" "autumn" "winter" ...
+                "lines" "colorcube" "prism" "flag" "white"];
             keep = false(size(cand));
             for k = 1:numel(cand)
                 keep(k) = ~isempty(which(cand(k)));
@@ -1816,7 +1817,7 @@ classdef ImageBrowserApp < handle
         function idx = roisOnCurrentFrame(app)
             if isempty(app.ROIs), idx = []; return; end
             idx = find([app.ROIs.Series] == app.SeriesIndex & ...
-                       [app.ROIs.Frame]  == app.frameLinear());
+                [app.ROIs.Frame]  == app.frameLinear());
         end
 
         function idx = roisInSeries(app)
@@ -1896,8 +1897,8 @@ classdef ImageBrowserApp < handle
             if nargin < 7, si = app.SeriesIndex; end
             if nargin < 8, frame = app.frameLinear(); end
             r = struct('Series', si, 'Frame', frame, 'Name', string(name), ...
-                       'Shape', string(shape), 'Pos', pos, 'Mask', logical(mask), ...
-                       'Color', color, 'Visible', true);
+                'Shape', string(shape), 'Pos', pos, 'Mask', logical(mask), ...
+                'Color', color, 'Visible', true);
             app.ROIs(end+1) = r;
             k = numel(app.ROIs);
             app.NextROINum = app.NextROINum + 1;
@@ -2025,7 +2026,7 @@ classdef ImageBrowserApp < handle
                 r = app.ROIs(k);
                 if ~r.Visible, continue; end
                 drawable = app.HasIPT && ~isempty(r.Pos) && r.Shape ~= "mask" && ...
-                           numel(app.LiveROIs) < liveBudget;
+                    numel(app.LiveROIs) < liveBudget;
                 if drawable
                     h = app.makeLiveROI(k);
                     if ~isempty(h) && isvalid(h)
@@ -2191,8 +2192,8 @@ classdef ImageBrowserApp < handle
             end
             n = app.frameCount();
             answer = inputdlg({sprintf('First frame (1-%d):', n), ...
-                              sprintf('Last frame (1-%d):', n)}, ...
-                              'Copy ROI to frames', 1, {'1', num2str(n)});
+                sprintf('Last frame (1-%d):', n)}, ...
+                'Copy ROI to frames', 1, {'1', num2str(n)});
             if isempty(answer), return; end
             a = max(1, min(n, round(str2double(answer{1}))));
             b = max(1, min(n, round(str2double(answer{2}))));
@@ -2689,7 +2690,7 @@ classdef ImageBrowserApp < handle
             if nnz(pos) < np
                 error('ImageBrowser:tooFewPoints', ...
                     ['Only %d usable points with S > 0; the %s model needs at ' ...
-                     'least %d.'], nnz(pos), model, np);
+                    'least %d.'], nnz(pos), model, np);
             end
 
             % --- stage 1: linear least squares on log(S) ----------------------
@@ -2737,7 +2738,7 @@ classdef ImageBrowserApp < handle
             if refine && isempty(which('lsqcurvefit'))
                 warning('ImageBrowser:noOptimToolbox', ...
                     ['Optimization Toolbox not found; reporting the log-linear ' ...
-                     'estimate without nonlinear refinement.']);
+                    'estimate without nonlinear refinement.']);
                 refine = false;
             end
             if refine
@@ -3255,7 +3256,7 @@ classdef ImageBrowserApp < handle
         function b = bytesPerPixel(precision)
             p = lower(char(precision));
             map = {'8',1; '16',2; '32',4; '64',8; 'double',8; 'single',4; ...
-                   'char',1; 'short',2; 'long',8; 'float',4; 'int',4};
+                'char',1; 'short',2; 'long',8; 'float',4; 'int',4};
             b = [];
             for k = 1:size(map, 1)
                 if contains(p, map{k,1})
@@ -3702,7 +3703,7 @@ classdef ImageBrowserApp < handle
             cp = ax.CurrentPoint;
             x = cp(1,1); y = cp(1,2);
             inside = x >= ax.XLim(1) && x <= ax.XLim(2) && ...
-                     y >= ax.YLim(1) && y <= ax.YLim(2);
+                y >= ax.YLim(1) && y <= ax.YLim(2);
         end
 
         function onMouseMove(app)
