@@ -79,7 +79,6 @@ classdef ImageBrowserApp < handle
         CmapInvert  (1,1) logical = false
         ActiveLayer (1,1) string  = "base"     % which layer W/L acts on
         ShowAllROIs (1,1) logical = false      % "sticky" ROIs
-        SelectedROI (1,:) double = []          % indices into app.ROIs
         LiveROIs    (1,:) cell = {}            % images.roi objects on screen
         LiveROIIdx  (1,:) double = []          % record index for each live object
         ROIListeners(1,:) cell = {}
@@ -101,7 +100,8 @@ classdef ImageBrowserApp < handle
         Closing     (1,1) logical = false
         ThemeChoice (1,1) string = "system"
         ROIColors   (:,3) double = lines(12)
-        NextROINum  (1,1) double = 1
+        ROIsDirty   (1,1) logical = false       % ROIs changed since last export
+        RoiLines    = gobjects(1,0)             % one plotted curve per ROI
     end
 
     properties (Constant, Access = private)
@@ -810,9 +810,9 @@ classdef ImageBrowserApp < handle
 
         %------------------------------------------------------------------
         function buildAnalysisTab(app, tab)
-            g = uigridlayout(tab, [20 2]);
-            g.RowHeight = repmat({'fit'}, 1, 20);
-            g.RowHeight{20} = '1x';
+            g = uigridlayout(tab, [21 2]);
+            g.RowHeight = repmat({'fit'}, 1, 21);
+            g.RowHeight{21} = '1x';
             g.ColumnWidth = {130,'1x'};
             g.Padding = [8 8 8 8]; g.RowSpacing = 5;
 
@@ -882,49 +882,56 @@ classdef ImageBrowserApp < handle
 
             head(12, 'Diffusion fit');
 
-            lab(13, 'Model');
+            lab(13, 'Fit region');
+            dd = uidropdown(g, 'Items', {'(no region shown)'}, ...
+                'Tooltip', ['Which region the fit describes. Independent of the ' ...
+                'table selection, which only drives Delete and Copy.']);
+            dd.Layout.Row = 13; dd.Layout.Column = 2;
+            app.UI.FitROIDrop = dd;
+
+            lab(14, 'Model');
             dd = uidropdown(g, 'Items', {'DTI  S0 exp(-bD)', 'DKI  + b^2D^2K/6'}, ...
                 'ItemsData', {'DTI', 'DKI'}, 'Value', 'DKI', ...
                 'Tooltip', ['DTI is the special case K = 0. The x-axis must hold ' ...
                 'b-values for the parameters to mean anything.']);
-            dd.Layout.Row = 13; dd.Layout.Column = 2;
+            dd.Layout.Row = 14; dd.Layout.Column = 2;
             app.UI.FitModelDrop = dd;
 
             c = uicheckbox(g, 'Text', 'Weight log stage by S^2', 'Value', true, ...
                 'Tooltip', ['Taking logs makes the noise heteroscedastic; weights ' ...
                 'proportional to S^2 undo that to first order.']);
-            c.Layout.Row = 14; c.Layout.Column = [1 2];
+            c.Layout.Row = 15; c.Layout.Column = [1 2];
             app.UI.FitWeighted = c;
 
             c = uicheckbox(g, 'Text', 'Refine by nonlinear least squares', 'Value', true, ...
                 'Tooltip', ['lsqcurvefit with an analytic Jacobian, started from the ' ...
                 'log-linear estimate.']);
-            c.Layout.Row = 15; c.Layout.Column = [1 2];
+            c.Layout.Row = 16; c.Layout.Column = [1 2];
             app.UI.FitRefine = c;
 
             b = uibutton(g, 'push', 'Text', 'Fit current curve', ...
                 'ButtonPushedFcn', @(~,~) app.uiFitDiffusion());
-            b.Layout.Row = 16; b.Layout.Column = 1;
+            b.Layout.Row = 17; b.Layout.Column = 1;
             b = uibutton(g, 'push', 'Text', 'Clear fit', ...
                 'ButtonPushedFcn', @(~,~) app.clearFit());
-            b.Layout.Row = 16; b.Layout.Column = 2;
+            b.Layout.Row = 17; b.Layout.Column = 2;
 
             l = uilabel(g, 'Text', 'No fit yet.', 'WordWrap', 'on', ...
                 'VerticalAlignment', 'top', 'FontName', 'Consolas');
-            l.Layout.Row = 17; l.Layout.Column = [1 2];
+            l.Layout.Row = 18; l.Layout.Column = [1 2];
             app.UI.FitInfo = l;
 
-            head(18, 'Other');
+            head(19, 'Other');
 
             b = uibutton(g, 'push', 'Text', 'Plot a function...', ...
                 'ButtonPushedFcn', @(~,~) app.uiPlotFunction());
-            b.Layout.Row = 19; b.Layout.Column = 1;
+            b.Layout.Row = 20; b.Layout.Column = 1;
             b = uibutton(g, 'push', 'Text', 'Export plot data...', ...
                 'ButtonPushedFcn', @(~,~) app.uiExportPlotData());
-            b.Layout.Row = 19; b.Layout.Column = 2;
+            b.Layout.Row = 20; b.Layout.Column = 2;
 
             l = uilabel(g, 'Text', '', 'WordWrap', 'on', 'VerticalAlignment', 'top');
-            l.Layout.Row = 20; l.Layout.Column = [1 2];
+            l.Layout.Row = 21; l.Layout.Column = [1 2];
             app.UI.PlotInfo = l;
         end
 
@@ -1602,8 +1609,16 @@ classdef ImageBrowserApp < handle
             %SETCHOICES  Repopulate a listbox or dropdown safely.
             %   Items and ItemsData must always have the same number of
             %   elements, so ItemsData is cleared before Items is replaced.
+            newItems = cellstr(string(items(:))');
+            if isequal(comp.Items, newItems) && isequaln(comp.ItemsData, data)
+                if nargin >= 5 && ~isempty(value) && ~isempty(data) && ...
+                        any(data == value)
+                    comp.Value = value;
+                end
+                return
+            end
             comp.ItemsData = [];
-            comp.Items = cellstr(string(items(:))');
+            comp.Items = newItems;
             if nargin >= 4 && ~isempty(data)
                 comp.ItemsData = data;
                 if nargin >= 5 && ~isempty(value) && any(data == value)
@@ -1791,6 +1806,10 @@ classdef ImageBrowserApp < handle
             app.UI.Axes.Color  = [0 0 0];
             app.UI.Axes.XColor = [0.55 0.55 0.55];
             app.UI.Axes.YColor = [0.55 0.55 0.55];
+            if isfield(app.UI, 'ROITable') && isvalid(app.UI.ROITable) && ...
+                    app.seriesCount() > 0
+                app.refreshROITable();
+            end
         end
     end
 
@@ -1826,7 +1845,102 @@ classdef ImageBrowserApp < handle
         end
 
         function c = nextColor(app)
-            c = app.ROIColors(mod(app.NextROINum - 1, size(app.ROIColors, 1)) + 1, :);
+            %NEXTCOLOR  First palette colour not already in use on this frame.
+            %   Counting the regions is not enough: delete the third of five
+            %   and the count says four, so the next region would reuse the
+            %   fifth colour. Colours already on the frame are read back
+            %   instead, matching how names are chosen.
+            pal = app.ROIColors;
+            here = app.roisOnCurrentFrame();
+            used = false(1, size(pal, 1));
+            for k = here
+                [d, i] = min(vecnorm(pal - double(app.ROIs(k).Color(:))', 2, 2));
+                if d < 1e-6
+                    used(i) = true;
+                end
+            end
+            free = find(~used, 1);
+            if isempty(free)
+                % More regions than the palette holds; repetition is now
+                % unavoidable, so cycle.
+                free = mod(numel(here), size(pal, 1)) + 1;
+            end
+            c = pal(free, :);
+        end
+
+        function nm = nextROIName(app)
+            %NEXTROINAME  Smallest unused roiN on the current frame.
+            here = app.roisOnCurrentFrame();
+            used = strings(1, numel(here));
+            for i = 1:numel(here)
+                used(i) = app.ROIs(here(i)).Name;
+            end
+            n = 1;
+            while any(used == "roi" + n)
+                n = n + 1;
+            end
+            nm = "roi" + n;
+        end
+
+        function idx = selectedROIIndices(app)
+            %SELECTEDROIINDICES  ROIs whose table rows are selected right now.
+            %   Read live from the table rather than cached, because
+            %   reassigning the table Data clears the selection and any cache
+            %   then silently disagrees with what the user sees.
+            idx = [];
+            t = app.UI.ROITable;
+            if isempty(t.UserData) || isempty(t.Selection), return; end
+            rows = unique(t.Selection(:, 1));
+            rows = rows(rows >= 1 & rows <= numel(t.UserData));
+            idx = reshape(t.UserData(rows), 1, []);
+        end
+
+        function idx = shownROIsOnFrame(app)
+            %SHOWNROISONFRAME  ROIs on this frame with Show ticked.
+            %   The Show column decides what is plotted; the table selection
+            %   decides what Delete and Copy act on; the Fit region dropdown
+            %   decides what is fitted. Three jobs, three separate controls.
+            idx = app.roisOnCurrentFrame();
+            if ~isempty(idx)
+                idx = idx(arrayfun(@(k) app.ROIs(k).Visible, idx));
+            end
+        end
+
+        function k = fitROIIndex(app)
+            %FITROIINDEX  The ROI the fit describes: whatever the Fit region
+            %   dropdown names. Deliberately independent of the table
+            %   selection.
+            k = [];
+            shown = app.shownROIsOnFrame();
+            if isempty(shown), return; end
+            d = app.UI.FitROIDrop;
+            if ~isempty(d.ItemsData) && ~isempty(d.Value) && ismember(d.Value, shown)
+                k = d.Value;
+            else
+                k = shown(1);
+            end
+        end
+
+        function refreshFitTargets(app)
+            %REFRESHFITTARGETS  Keep the Fit region dropdown in step with the
+            %   regions currently shown, preserving the choice where possible.
+            d = app.UI.FitROIDrop;
+            shown = app.shownROIsOnFrame();
+            if isempty(shown)
+                app.setChoices(d, "(no region shown)", []);
+                d.Enable = 'off';
+                return
+            end
+            nm = strings(1, numel(shown));
+            for i = 1:numel(shown)
+                nm(i) = app.ROIs(shown(i)).Name;
+            end
+            keep = shown(1);
+            if ~isempty(d.ItemsData) && ~isempty(d.Value) && ismember(d.Value, shown)
+                keep = d.Value;
+            end
+            app.setChoices(d, nm, shown, keep);
+            d.Enable = 'on';
         end
 
         function newROI(app, shape)
@@ -1881,8 +1995,7 @@ classdef ImageBrowserApp < handle
                 app.refreshStatus();
                 return
             end
-            app.addROIRecord(mask, pos, string(shape), ...
-                "roi" + app.NextROINum, col);
+            app.addROIRecord(mask, pos, string(shape), app.nextROIName(), col);
             app.refreshAll();
         end
 
@@ -1896,13 +2009,21 @@ classdef ImageBrowserApp < handle
         function k = addROIRecord(app, mask, pos, shape, name, color, si, frame)
             if nargin < 7, si = app.SeriesIndex; end
             if nargin < 8, frame = app.frameLinear(); end
+            % Going from no regions to one on the visible frame is the moment
+            % the pixel curve stops being the useful default. Only that
+            % transition switches, so a deliberate move back to pixel mode
+            % while regions exist is not overridden.
+            firstHere = si == app.SeriesIndex && frame == app.frameLinear() && ...
+                isempty(app.roisOnCurrentFrame()) && app.PlotMode == "pixel";
             r = struct('Series', si, 'Frame', frame, 'Name', string(name), ...
                 'Shape', string(shape), 'Pos', pos, 'Mask', logical(mask), ...
                 'Color', color, 'Visible', true);
             app.ROIs(end+1) = r;
             k = numel(app.ROIs);
-            app.NextROINum = app.NextROINum + 1;
-            app.SelectedROI = k;
+            app.ROIsDirty = true;
+            if firstHere
+                app.setPlotMode("roi");
+            end
         end
 
         function mask = maskFromROIObject(~, h, nr, nc)
@@ -1974,6 +2095,7 @@ classdef ImageBrowserApp < handle
             img = app.currentImage();
             app.ROIs(k).Mask = app.maskFromROIObject(src, size(img,1), size(img,2));
             app.ROIs(k).Pos  = app.posFromROIObject(src);
+            app.ROIsDirty = true;
             app.refreshROITable();
             app.refreshPlot();
         end
@@ -1981,7 +2103,7 @@ classdef ImageBrowserApp < handle
         function onROIDeleted(app, k)
             if k > numel(app.ROIs), return; end
             app.ROIs(k) = [];
-            app.SelectedROI = [];
+            app.ROIsDirty = true;
             app.refreshAll();
         end
 
@@ -2072,18 +2194,66 @@ classdef ImageBrowserApp < handle
                 Show(i) = r.Visible; Name{i} = char(r.Name);
                 N(i) = st.N; Mean(i) = st.Mean; SD(i) = st.SD;
             end
-            app.UI.ROITable.Data = table(Show, Name, N, Mean, SD);
-            app.UI.ROITable.UserData = idx;
+            app.refreshFitTargets();
+            % Reassigning Data cancels any cell edit in progress, so only do it
+            % when the contents have actually changed.
+            newData = table(Show, Name, N, Mean, SD);
+            if ~isequaln(app.UI.ROITable.Data, newData)
+                keep = app.selectedROIIndices();
+                app.UI.ROITable.Data = newData;
+                app.UI.ROITable.UserData = idx;
+                rows = find(ismember(idx, keep));
+                if ~isempty(rows)
+                    app.UI.ROITable.Selection = rows(:);
+                end
+            else
+                app.UI.ROITable.UserData = idx;
+            end
+
+            % Name each region in its own colour, so the table and the outlines
+            % on the image can be matched at a glance.
+            removeStyle(app.UI.ROITable);
+            for i = 1:n
+                addStyle(app.UI.ROITable, ...
+                    uistyle('FontColor', app.legibleColor(app.ROIs(idx(i)).Color)), ...
+                    'cell', [i 2]);
+            end
 
             if n == 0
                 app.UI.ROISummary.Text = 'No ROI on this frame.';
             else
                 m = app.getROIMask(true);
                 st = ImageBrowserApp.maskStats(img, m);
-                app.UI.ROISummary.Text = sprintf(['Union of %d ROI(s): %d pixels, ' ...
-                    'mean %.6g, SD %.6g, median %.6g, range [%.6g %.6g]'], ...
+                app.UI.ROISummary.Text = sprintf(['All %d ROI(s) combined: %d pixels, ' ...
+                    'mean %.6g, SD %.6g, median %.6g, range [%.6g %.6g]. ' ...
+                    'Curves and fits use one ROI at a time.'], ...
                     n, st.N, st.Mean, st.SD, st.Median, st.Min, st.Max);
             end
+        end
+
+        function c = legibleColor(app, c)
+            %LEGIBLECOLOR  Nudge a ROI colour to stay readable as table text.
+            %   The palette is chosen for lines on a black image, where a pale
+            %   yellow reads well; as text on a white table it does not. Hue is
+            %   kept and only lightness moves, and the direction depends on the
+            %   theme in force.
+            c = double(c(:))';
+            dark = app.ThemeChoice == "dark";
+            try
+                dark = strcmpi(app.UI.Fig.Theme.BaseColorStyle, 'dark');
+            catch
+                % Older releases expose no resolved theme; fall back to the
+                % explicit choice made above.
+            end
+            L = 0.2126*c(1) + 0.7152*c(2) + 0.0722*c(3);
+            if dark
+                if L < 0.45
+                    c = c + (1 - c) * (0.45 - L) / max(1 - L, eps);
+                end
+            elseif L > 0.55
+                c = c * (0.55 / L);
+            end
+            c = min(1, max(0, c));
         end
 
         function onROITableEdit(app, e)
@@ -2094,29 +2264,35 @@ classdef ImageBrowserApp < handle
             switch col
                 case 1
                     app.ROIs(k).Visible = logical(e.NewData);
-                    app.refreshROIDisplay();
                 case 2
                     app.ROIs(k).Name = string(e.NewData);
             end
+            app.ROIsDirty = true;
+            % The name is carried by the live ROI object's label, so a rename
+            % needs the regions redrawn, not just the table updated. Show
+            % governs the plot and the fit target, and the name appears in the
+            % legend, so those follow too.
+            app.refreshROIDisplay();
+            app.refreshFitTargets();
+            app.refreshPlot();
         end
 
-        function onROITableSelect(app, e)
-            idx = app.UI.ROITable.UserData;
-            rows = e.Selection;
-            if isempty(rows) || isempty(idx)
-                app.SelectedROI = [];
-            else
-                rows = rows(:, 1);
-                rows = rows(rows <= numel(idx));
-                app.SelectedROI = idx(rows);
-            end
+        function onROITableSelect(app, ~)
+            % The selection itself lives in the table; nothing to cache here.
             app.refreshPlot();
         end
 
         function deleteSelectedROIs(app)
-            if isempty(app.SelectedROI), return; end
-            app.ROIs(app.SelectedROI) = [];
-            app.SelectedROI = [];
+            k = app.selectedROIIndices();
+            if isempty(k)
+                uialert(app.UI.Fig, ['Select one or more rows in the ROI table ' ...
+                    'first, then press Delete selected.'], 'Nothing selected', ...
+                    'Icon', 'info');
+                return
+            end
+            app.ROIs(k) = [];
+            app.ROIsDirty = true;
+            app.UI.ROITable.Selection = [];
             app.refreshAll();
         end
 
@@ -2124,7 +2300,8 @@ classdef ImageBrowserApp < handle
             k = app.roisOnCurrentFrame();
             if isempty(k), return; end
             app.ROIs(k) = [];
-            app.SelectedROI = [];
+            app.ROIsDirty = true;
+            app.UI.ROITable.Selection = [];
             app.refreshAll();
         end
 
@@ -2132,7 +2309,8 @@ classdef ImageBrowserApp < handle
             k = app.roisInSeries();
             if isempty(k), return; end
             app.ROIs(k) = [];
-            app.SelectedROI = [];
+            app.ROIsDirty = true;
+            app.UI.ROITable.Selection = [];
             app.refreshAll();
         end
 
@@ -2182,7 +2360,7 @@ classdef ImageBrowserApp < handle
         end
 
         function uiCopyROIToFrames(app)
-            sel = app.SelectedROI;
+            sel = app.selectedROIIndices();
             if isempty(sel)
                 sel = app.roisOnCurrentFrame();
             end
@@ -2207,6 +2385,7 @@ classdef ImageBrowserApp < handle
                     app.ROIs(end+1) = r2;
                 end
             end
+            app.ROIsDirty = true;
             app.refreshAll();
         end
 
@@ -2260,6 +2439,7 @@ classdef ImageBrowserApp < handle
                     end
                 end
             end
+            app.ROIsDirty = true;
             app.refreshAll();
         end
     end
@@ -2371,39 +2551,27 @@ classdef ImageBrowserApp < handle
         end
 
         %------------------------------------------------------------------
-        function [x, y, sd, lbl] = sweepCurve(app)
-            x = []; y = []; sd = []; lbl = "";
+        function [x, y, sd] = sweepValues(app, mask, pix)
+            %SWEEPVALUES  Signal along the sweep dimension.
+            %   Give a logical MASK for a region mean, or a [row col] PIX for a
+            %   single voxel. Exactly one of the two.
+            x = []; y = []; sd = [];
             if app.seriesCount() == 0, return; end
-            a = app.PlotRange(1); b = app.PlotRange(2);
             n = app.sweepLength();
-            a = max(1, min(n, a)); b = max(1, min(n, b));
+            a = max(1, min(n, app.PlotRange(1)));
+            b = max(1, min(n, app.PlotRange(2)));
             k = a:b;
             if isempty(k), return; end
 
-            if app.PlotMode == "roi"
-                mask = app.plotMask();
-                if isempty(mask) || ~any(mask(:))
-                    lbl = "no ROI on this frame";
-                    return
-                end
-            else
-                p = app.LastPixel;
-                if ~all(isfinite(p))
-                    lbl = "move the pointer over the image";
-                    return
-                end
-                mask = [];
-            end
-
-            y = nan(1, numel(k));
+            y  = nan(1, numel(k));
             sd = nan(1, numel(k));
             for i = 1:numel(k)
                 img = app.sweepImage(k(i));
                 if isempty(img), continue; end
                 if size(img, 3) > 1, img = mean(double(img), 3); end
                 if isempty(mask)
-                    if p(1) <= size(img,1) && p(2) <= size(img,2)
-                        y(i) = double(img(p(1), p(2)));
+                    if pix(1) <= size(img,1) && pix(2) <= size(img,2)
+                        y(i) = double(img(pix(1), pix(2)));
                     end
                 else
                     if size(img,1) == size(mask,1) && size(img,2) == size(mask,2)
@@ -2421,10 +2589,37 @@ classdef ImageBrowserApp < handle
                     x = app.XData(k);
                 end
             end
+        end
+
+        function [x, y, sd, lbl, col] = sweepCurve(app)
+            %SWEEPCURVE  The one curve that analysis acts on.
+            %   In pixel mode that is the voxel under the cursor. In ROI mode
+            %   it is the single selected ROI - regions are never combined,
+            %   because a fit to a union of unrelated regions means nothing.
+            x = []; y = []; sd = []; lbl = ""; col = [0 0.447 0.741];
+            if app.seriesCount() == 0, return; end
+
             if app.PlotMode == "roi"
-                lbl = sprintf('ROI mean over %s', app.sweepName());
+                k = app.fitROIIndex();
+                if isempty(k)
+                    if isempty(app.roisOnCurrentFrame())
+                        lbl = "no ROI on this frame";
+                    else
+                        lbl = "select exactly one ROI in the table";
+                    end
+                    return
+                end
+                [x, y, sd] = app.sweepValues(app.ROIs(k).Mask, []);
+                col = app.ROIs(k).Color;
+                lbl = sprintf('%s over %s', app.ROIs(k).Name, app.sweepName());
             else
-                lbl = sprintf('pixel (%d,%d) over %s', p(1), p(2), app.sweepName());
+                pix = app.LastPixel;
+                if ~all(isfinite(pix))
+                    lbl = "move the pointer over the image";
+                    return
+                end
+                [x, y, sd] = app.sweepValues([], pix);
+                lbl = sprintf('pixel (%d,%d) over %s', pix(1), pix(2), app.sweepName());
             end
         end
 
@@ -2434,20 +2629,6 @@ classdef ImageBrowserApp < handle
             else
                 s = app.Series(app.SeriesIndex);
                 nm = char(s.DimNames(min(app.SweepDim, numel(s.DimNames))));
-            end
-        end
-
-        function mask = plotMask(app)
-            sel = app.SelectedROI;
-            here = app.roisOnCurrentFrame();
-            sel = intersect(sel, here);
-            if isempty(sel), sel = here; end
-            img = app.currentImage();
-            mask = false(size(img,1), size(img,2));
-            for k = sel(:)'
-                if app.ROIs(k).Visible && isequal(size(app.ROIs(k).Mask), size(mask))
-                    mask = mask | app.ROIs(k).Mask;
-                end
             end
         end
 
@@ -2469,45 +2650,123 @@ classdef ImageBrowserApp < handle
         end
 
         %------------------------------------------------------------------
+        function clearRoiCurves(app)
+            h = app.RoiLines;
+            if ~isempty(h)
+                delete(h(isgraphics(h)));
+            end
+            app.RoiLines = gobjects(1, 0);
+        end
+
+        function refreshLegend(app, ax)
+            %REFRESHLEGEND  List every curve actually on screen: the data, the
+            %   fitted model and any plotted function. Built after all three
+            %   are drawn, so a fit is named even when a single region is shown.
+            h = gobjects(1, 0);
+            if app.PlotMode == "roi"
+                h = app.RoiLines;
+            elseif logical(app.UI.PlotLine.Visible)
+                h = app.UI.PlotLine;
+            end
+            if any(isfinite(app.UI.PlotFit.XData)), h(end+1) = app.UI.PlotFit; end
+            if any(isfinite(app.UI.PlotFun.XData)), h(end+1) = app.UI.PlotFun; end
+            if numel(h) > 1
+                legend(ax, h, 'Location', 'best', 'Box', 'off', 'FontSize', 8);
+            else
+                legend(ax, 'off');
+            end
+        end
+
+        function blankPlot(app, msg)
+            app.UI.PlotLine.Visible = 'off';
+            app.UI.PlotBand.XData = NaN; app.UI.PlotBand.YData = NaN;
+            app.UI.PlotFit.XData  = NaN; app.UI.PlotFit.YData  = NaN;
+            app.UI.PlotFun.XData  = NaN; app.UI.PlotFun.YData  = NaN;
+            legend(app.UI.PlotAxes, 'off');
+            app.UI.PlotInfo.Text = char(msg);
+            title(app.UI.PlotAxes, char(msg));
+            app.UI.Fig.UserData = [];
+        end
+
         function refreshPlot(app)
             if ~isfield(app.UI, 'PlotAxes') || ~isvalid(app.UI.PlotAxes), return; end
             if ~logical(app.UI.PlotPanel.Visible), return; end
-            [x, y, sd, lbl] = app.sweepCurve();
             ax = app.UI.PlotAxes;
+            app.clearRoiCurves();
+            app.UI.PlotLine.Visible = 'off';
+            app.UI.PlotBand.XData = NaN; app.UI.PlotBand.YData = NaN;
 
-            if isempty(x) || all(isnan(y))
-                app.UI.PlotLine.XData = NaN; app.UI.PlotLine.YData = NaN;
-                app.UI.PlotBand.XData = NaN; app.UI.PlotBand.YData = NaN;
-                app.UI.PlotInfo.Text = char(lbl);
-                title(ax, char(lbl));
-                return
-            end
+            if app.PlotMode == "roi"
+                % One curve per visible ROI, drawn in that ROI's own colour.
+                idx = app.shownROIsOnFrame();
+                if isempty(idx)
+                    if isempty(app.roisOnCurrentFrame())
+                        app.blankPlot('No ROI on this frame.');
+                    else
+                        app.blankPlot('No ROI is ticked in the Show column.');
+                    end
+                    return
+                end
+                names = strings(1, 0);
+                X = []; Y = []; SD = [];
+                for k = idx
+                    [xk, yk, sdk] = app.sweepValues(app.ROIs(k).Mask, []);
+                    if isempty(xk) || all(isnan(yk)), continue; end
+                    yy = yk;
+                    if app.UI.ChkLogY.Value, yy = abs(yy); end
+                    h = plot(ax, xk, yy, 'o-', 'LineWidth', 1.2, 'MarkerSize', 4, ...
+                        'Color', app.ROIs(k).Color, ...
+                        'DisplayName', char(app.ROIs(k).Name));
+                    app.RoiLines(end+1) = h;
+                    names(end+1) = app.ROIs(k).Name; %#ok<AGROW>
+                    X = xk; Y = [Y; yk]; SD = [SD; sdk]; %#ok<AGROW>
+                end
+                if isempty(app.RoiLines)
+                    app.blankPlot('No usable ROI curve.');
+                    return
+                end
 
-            yy = y;
-            if app.UI.ChkLogY.Value, yy = abs(yy); end
-            app.UI.PlotLine.XData = x;
-            app.UI.PlotLine.YData = yy;
-
-            if app.PlotMode == "roi" && app.UI.ChkSD.Value && any(isfinite(sd))
-                good = isfinite(y) & isfinite(sd);
-                xb = [x(good), fliplr(x(good))];
-                yb = [y(good) + sd(good), fliplr(y(good) - sd(good))];
-                app.UI.PlotBand.XData = xb;
-                app.UI.PlotBand.YData = yb;
+                % The spread band would be unreadable over several curves.
+                if numel(app.RoiLines) == 1 && app.UI.ChkSD.Value && any(isfinite(SD))
+                    good = isfinite(Y) & isfinite(SD);
+                    app.UI.PlotBand.XData = [X(good), fliplr(X(good))];
+                    app.UI.PlotBand.YData = [Y(good) + SD(good), fliplr(Y(good) - SD(good))];
+                    app.UI.PlotBand.FaceColor = app.RoiLines(1).Color;
+                    uistack(app.UI.PlotBand, 'bottom');
+                end
+                if numel(app.RoiLines) > 1
+                    lbl = sprintf('%d ROIs over %s', numel(app.RoiLines), app.sweepName());
+                else
+                    lbl = sprintf('%s over %s', names(1), app.sweepName());
+                end
+                x = X; y = Y; sd = SD;
             else
-                app.UI.PlotBand.XData = NaN;
-                app.UI.PlotBand.YData = NaN;
+                [x, y, sd, lbl] = app.sweepCurve();
+                if isempty(x) || all(isnan(y))
+                    app.blankPlot(lbl);
+                    return
+                end
+                yy = y;
+                if app.UI.ChkLogY.Value, yy = abs(yy); end
+                app.UI.PlotLine.Visible = 'on';
+                app.UI.PlotLine.XData = x;
+                app.UI.PlotLine.YData = yy;
+                app.UI.PlotLine.DisplayName = sprintf('pixel (%d,%d)', ...
+                    app.LastPixel(1), app.LastPixel(2));
+                names = "pixel";
             end
 
             app.drawFunOverlay(x);
             app.drawFitCurve();
+            app.refreshLegend(ax);
 
             xlabel(ax, char(app.XLabel));
             ylabel(ax, 'Signal');
             title(ax, char(lbl));
-            app.UI.PlotInfo.Text = sprintf('%s\n%d points, mean %.6g', lbl, ...
-                sum(isfinite(y)), mean(y, 'omitnan'));
-            app.UI.Fig.UserData = struct('x', x, 'y', y, 'sd', sd, 'label', lbl);
+            app.UI.PlotInfo.Text = sprintf('%s\n%d point(s), mean %.6g', lbl, ...
+                sum(isfinite(y(1,:))), mean(y(1,:), 'omitnan'));
+            app.UI.Fig.UserData = struct('x', x, 'y', y, 'sd', sd, ...
+                'names', names, 'label', string(lbl));
         end
 
         function drawFunOverlay(app, x)
@@ -2576,6 +2835,17 @@ classdef ImageBrowserApp < handle
             yg = ImageBrowserApp.dkiSignal(r.P, xg, r.Model);
             app.UI.PlotFit.XData = xg;
             app.UI.PlotFit.YData = yg(:)';
+            if isfield(r, 'Color') && ~isempty(r.Color)
+                % Same colour as the region it describes, dashed and without
+                % markers so it stays distinguishable from the data.
+                app.UI.PlotFit.Color = r.Color;
+            end
+            app.UI.PlotFit.LineStyle = '--';
+            if isfield(r, 'Region') && strlength(string(r.Region)) > 0
+                app.UI.PlotFit.DisplayName = char(r.Model + " fit " + r.Region);
+            else
+                app.UI.PlotFit.DisplayName = char(r.Model + " fit");
+            end
         end
 
         function clearFit(app)
@@ -2586,11 +2856,20 @@ classdef ImageBrowserApp < handle
 
         function uiFitDiffusion(app)
             app.setPlotPanel(true);
-            [x, y, ~, lbl] = app.sweepCurve();
+            [x, y, ~, lbl, col] = app.sweepCurve();
             if isempty(x) || all(isnan(y))
-                uialert(app.UI.Fig, ['There is no curve to fit. Draw a ROI and ' ...
-                    'choose "ROI mean", or click a pixel with "Pixel under cursor".'], ...
-                    'Diffusion fit');
+                if app.PlotMode == "roi"
+                    if isempty(app.roisOnCurrentFrame())
+                        msg = 'Draw a ROI on this frame first.';
+                    else
+                        msg = ['No region is ticked in the Show column, so there ' ...
+                               'is nothing to fit.'];
+                    end
+                else
+                    msg = ['Click a pixel on the image first, or set Plot to ' ...
+                           '"ROI mean".'];
+                end
+                uialert(app.UI.Fig, msg, 'Diffusion fit');
                 return
             end
             if isempty(app.XData)
@@ -2610,6 +2889,17 @@ classdef ImageBrowserApp < handle
                 return
             end
             r.Label = string(lbl);
+            r.Color = col;
+            if app.PlotMode == "roi"
+                kFit = app.fitROIIndex();
+                if isempty(kFit)
+                    r.Region = "";
+                else
+                    r.Region = app.ROIs(kFit).Name;
+                end
+            else
+                r.Region = sprintf('pixel (%d,%d)', app.LastPixel(1), app.LastPixel(2));
+            end
             app.FitResult = r;
             app.UI.FitInfo.Text = ImageBrowserApp.formatFit(r);
             app.refreshPlot();
@@ -3073,10 +3363,13 @@ classdef ImageBrowserApp < handle
             assignin('base', name, app.getROIMask(true));
         end
 
-        function uiExportROISeq(app)
+        function ok = uiExportROISeq(app)
+            ok = false;
             name = app.askName('Variable name for the ROI sequence:', 'ROIseq');
             if isempty(name), return; end
             assignin('base', name, app.buildROISeq());
+            app.ROIsDirty = false;
+            ok = true;
         end
 
         function seq = buildROISeq(app)
@@ -3109,6 +3402,7 @@ classdef ImageBrowserApp < handle
             if isempty(name), return; end
             assignin('base', name, app.roiStats());
             assignin('base', [name '_legacy'], app.legacyROIStats());
+            app.ROIsDirty = false;
         end
 
         function temp = legacyROIStats(app)
@@ -3140,6 +3434,7 @@ classdef ImageBrowserApp < handle
             [f, p] = uiputfile({'*.csv'}, 'Export ROI statistics', 'roistats.csv');
             if isequal(f, 0), return; end
             writetable(T, fullfile(p, f));
+            app.ROIsDirty = false;
         end
 
         function uiExportPlotData(app)
@@ -3148,20 +3443,35 @@ classdef ImageBrowserApp < handle
                 uialert(app.UI.Fig, 'There is no plotted curve to export.', 'Export');
                 return
             end
-            choice = uiconfirm(app.UI.Fig, 'Where should the curve go?', 'Export plot data', ...
-                'Options', {'Workspace', 'CSV file', 'Cancel'}, 'DefaultOption', 1, ...
-                'CancelOption', 3);
+            T = app.plotDataTable(d);
+            choice = uiconfirm(app.UI.Fig, 'Where should the curve go?', ...
+                'Export plot data', 'Options', {'Workspace', 'CSV file', 'Cancel'}, ...
+                'DefaultOption', 1, 'CancelOption', 3);
             switch choice
                 case 'Workspace'
-                    name = app.askName('Variable name for the plotted curve:', 'curve');
+                    name = app.askName('Variable name for the plotted curve(s):', 'curve');
                     if isempty(name), return; end
-                    T = table(d.x(:), d.y(:), d.sd(:), 'VariableNames', {'x','y','sd'});
                     assignin('base', name, T);
                 case 'CSV file'
-                    [f, p] = uiputfile({'*.csv'}, 'Export curve', 'curve.csv');
+                    [f, pth] = uiputfile({'*.csv'}, 'Export curve', 'curve.csv');
                     if isequal(f, 0), return; end
-                    T = table(d.x(:), d.y(:), d.sd(:), 'VariableNames', {'x','y','sd'});
-                    writetable(T, fullfile(p, f));
+                    writetable(T, fullfile(pth, f));
+            end
+        end
+
+        function T = plotDataTable(~, d)
+            %PLOTDATATABLE  One x column plus a y (and sd) column per curve.
+            T = table(d.x(:), 'VariableNames', {'x'});
+            for i = 1:size(d.y, 1)
+                if i <= numel(d.names)
+                    tag = d.names(i);
+                else
+                    tag = "curve" + i;
+                end
+                T.(char(matlab.lang.makeValidName("y_" + tag))) = d.y(i, :)';
+                if any(isfinite(d.sd(i, :)))
+                    T.(char(matlab.lang.makeValidName("sd_" + tag))) = d.sd(i, :)';
+                end
             end
         end
 
@@ -3220,6 +3530,24 @@ classdef ImageBrowserApp < handle
     end
 
     methods (Static, Hidden)
+        function tf = isTextEntry(obj)
+            %ISTEXTENTRY  True for controls that consume keystrokes themselves.
+            tf = false;
+            if isempty(obj), return; end
+            try
+                if ~isvalid(obj), return; end
+            catch
+                return
+            end
+            tf = isa(obj, 'matlab.ui.control.Table') || ...
+                 isa(obj, 'matlab.ui.control.EditField') || ...
+                 isa(obj, 'matlab.ui.control.NumericEditField') || ...
+                 isa(obj, 'matlab.ui.control.TextArea') || ...
+                 isa(obj, 'matlab.ui.control.Spinner') || ...
+                 isa(obj, 'matlab.ui.control.DropDown') || ...
+                 isa(obj, 'matlab.ui.control.ListBox');
+        end
+
         function idx = toIndexed(img, lim, n)
             if size(img, 3) > 1
                 img = mean(double(img), 3);
@@ -3310,6 +3638,19 @@ classdef ImageBrowserApp < handle
             record("import legacy ROI formats",        @tImport);
             record("pixel and ROI curves",             @tPlot);
             record("overlay",                          @tOverlay);
+            record("delete removes the selected ROI",  @tDeleteSelected);
+            record("names and colours restart",        @tNamingRestarts);
+            record("curve colours follow the ROIs",    @tCurveColours);
+            record("fit target follows the dropdown",  @tFitTarget);
+            record("Show governs plot and fit target", @tShowGoverns);
+            record("first ROI switches to ROI mean",   @tRoiModeDefault);
+            record("rename redraws the ROI label",     @tRenameRedraws);
+            record("fit is named in the legend",       @tFitLegend);
+            record("ROI names take the ROI colour",    @tNameColours);
+            record("colours survive a middle delete",  @tColoursAfterDelete);
+            record("controls keep their own keystrokes", @tKeyGuard);
+            record("the ROI table is not rebuilt idly", @tTableStable);
+            record("dirty flag tracks exports",        @tDirtyFlag);
             record("add and remove series",            @tSeries);
             record("theme switching",                  @tTheme);
             record("construct from cell array",        @tCell);
@@ -3505,13 +3846,261 @@ classdef ImageBrowserApp < handle
                 [x, y] = a.sweepCurve();
                 want(numel(x) == 9 && numel(y) == 9, 'the pixel curve has the wrong length');
                 want(isequal(x, 0:8), 'the custom x-axis was not used');
+                want(numel(a.UI.PlotLine.XData) == 9, 'the pixel line was not drawn');
                 a.setPlotMode("roi");
                 [x2, y2, sd2] = a.sweepCurve();
                 want(numel(x2) == 9 && all(isfinite(y2)) && all(isfinite(sd2)), ...
                     'the ROI curve is incomplete');
                 a.refreshPlot();
-                want(numel(a.UI.PlotLine.XData) == 9, 'the plot line was not updated');
+                want(numel(a.RoiLines) == numel(a.roisOnCurrentFrame()), ...
+                    'one curve per ROI was not drawn');
                 a.setPlotPanel(false);
+            end
+
+            function tDeleteSelected()
+                a.gotoFrame(9);
+                a.deleteFrameROIs();
+                m1 = false(48,52); m1(5:10,  5:10)  = true;
+                m2 = false(48,52); m2(20:25, 20:25) = true;
+                m3 = false(48,52); m3(30:35, 30:35) = true;
+                a.addROIRecord(m1, [], "mask", "first",  [1 0 0]);
+                a.addROIRecord(m2, [], "mask", "second", [0 1 0]);
+                a.addROIRecord(m3, [], "mask", "third",  [0 0 1]);
+                a.refreshAll();
+                want(numel(a.roisOnCurrentFrame()) == 3, 'three ROIs expected');
+
+                here = a.roisOnCurrentFrame();
+                a.UI.ROITable.Selection = 2;          % the middle one
+                want(isequal(a.selectedROIIndices(), here(2)), ...
+                    'the live selection does not map to the middle ROI');
+                a.deleteSelectedROIs();
+                left = a.roisOnCurrentFrame();
+                nmLeft = strings(1, numel(left));
+                for q = 1:numel(left)
+                    nmLeft(q) = a.ROIs(left(q)).Name;
+                end
+                want(numel(left) == 2, 'exactly one ROI should have gone');
+                want(all(nmLeft ~= "second"), 'the selected ROI was not the one deleted');
+                want(any(nmLeft == "third"), 'the last ROI was deleted instead');
+
+                a.UI.ROITable.Selection = 1;
+                a.deleteSelectedROIs();
+                want(numel(a.roisOnCurrentFrame()) == 1, 'deleting a single selection failed');
+            end
+
+            function tNamingRestarts()
+                a.gotoFrame(11);
+                a.deleteFrameROIs();
+                m = false(48,52); m(5:9, 5:9) = true;
+                a.addROIRecord(m, [], "mask", a.nextROIName(), a.nextColor());
+                a.refreshAll();
+                want(a.ROIs(end).Name == "roi1", 'first ROI on a clean frame should be roi1');
+                c1 = a.nextColor();
+                a.addROIRecord(m, [], "mask", a.nextROIName(), c1);
+                a.refreshAll();
+                want(a.ROIs(end).Name == "roi2", 'second ROI should be roi2');
+                want(~isequal(a.ROIs(end).Color, a.ROIs(end-1).Color), ...
+                    'two ROIs on one frame must not share a colour');
+                a.deleteFrameROIs();
+                a.addROIRecord(m, [], "mask", a.nextROIName(), a.nextColor());
+                a.refreshAll();
+                want(a.ROIs(end).Name == "roi1", 'naming did not restart after deleting all');
+                a.deleteFrameROIs();
+            end
+
+            function tCurveColours()
+                a.gotoFrame(13);
+                a.deleteFrameROIs();
+                m1 = false(48,52); m1(5:10,  5:10)  = true;
+                m2 = false(48,52); m2(20:25, 20:25) = true;
+                a.addROIRecord(m1, [], "mask", "aa", [1 0 0]);
+                a.addROIRecord(m2, [], "mask", "bb", [0 1 0]);
+                a.setPlotMode("roi");
+                a.setPlotPanel(true);
+                a.refreshAll();
+                want(numel(a.RoiLines) == 2, 'expected one line per ROI');
+                cols = vertcat(a.RoiLines.Color);
+                want(ismember([1 0 0], cols, 'rows') && ismember([0 1 0], cols, 'rows'), ...
+                    'curves are not drawn in the ROI colours');
+                a.setPlotPanel(false);
+            end
+
+            function tFitTarget()
+                a.gotoFrame(13);          % still holds aa and bb from above
+                a.refreshAll();
+                want(numel(a.UI.FitROIDrop.ItemsData) == 2, ...
+                    'both shown regions should be offered as fit targets');
+                a.UI.FitROIDrop.Value = a.UI.FitROIDrop.ItemsData(2);
+                [x, y, ~, lbl, col] = a.sweepCurve();
+                want(~isempty(x) && any(isfinite(y)), 'the chosen region gave no curve');
+                want(isequal(col, [0 1 0]), 'the fit target is not the chosen region');
+                want(contains(lbl, "bb"), 'the label should name the chosen region');
+
+                % The table selection must not influence the fit target.
+                a.UI.ROITable.Selection = 1;
+                [~, ~, ~, ~, col2] = a.sweepCurve();
+                want(isequal(col2, [0 1 0]), ...
+                    'selecting a row must not change what gets fitted');
+                a.UI.ROITable.Selection = [];
+            end
+
+            function tShowGoverns()
+                a.gotoFrame(13);
+                shown = a.shownROIsOnFrame();
+                want(numel(shown) == 2, 'both regions should start shown');
+                a.setPlotPanel(true); a.refreshAll();
+                want(numel(a.RoiLines) == 2, 'both regions should be plotted');
+
+                a.ROIs(shown(2)).Visible = false;
+                a.refreshAll();
+                want(numel(a.shownROIsOnFrame()) == 1, 'the hidden region is still shown');
+                want(numel(a.UI.FitROIDrop.ItemsData) == 1, ...
+                    'the hidden region is still offered as a fit target');
+                want(numel(a.RoiLines) == 1, 'the hidden region is still plotted');
+                a.setPlotPanel(false);
+                a.deleteFrameROIs();
+            end
+
+            function tRoiModeDefault()
+                a.gotoFrame(17);
+                a.deleteFrameROIs();
+                a.setPlotMode("pixel");
+                m = false(48,52); m(5:9, 5:9) = true;
+                a.addROIRecord(m, [], "mask", "d1", [1 0 0]);
+                want(a.PlotMode == "roi", ...
+                    'the first region on a frame should switch the plot to ROI mean');
+                a.setPlotMode("pixel");     % a deliberate move back
+                a.addROIRecord(m, [], "mask", "d2", [0 1 0]);
+                want(a.PlotMode == "pixel", ...
+                    'a later region must not override the chosen mode');
+                a.deleteFrameROIs();
+            end
+
+            function tDirtyFlag()
+                a.gotoFrame(15);
+                a.deleteFrameROIs();
+                m = false(48,52); m(5:9, 5:9) = true;
+                a.addROIRecord(m, [], "mask", "x", [1 0 0]);
+                want(a.ROIsDirty, 'adding a ROI should mark the set dirty');
+                a.ROIsDirty = false;
+                a.deleteFrameROIs();
+                want(a.ROIsDirty, 'deleting should mark the set dirty');
+                a.ROIsDirty = false;
+            end
+
+            function tRenameRedraws()
+                a.gotoFrame(19);
+                a.deleteFrameROIs();
+                m = false(48,52); m(6:14, 6:14) = true;
+                a.addROIRecord(m, [], "mask", "before", [1 0 0]);
+                a.refreshAll();
+                k = a.roisOnCurrentFrame();
+                a.onROITableEdit(struct('Indices', [1 2], 'NewData', 'after'));
+                want(a.ROIs(k(1)).Name == "after", 'the rename did not reach the record');
+                want(any(cellfun(@(h) isvalid(h) && string(h.Label) == "after", ...
+                    a.LiveROIs)) || isempty(a.LiveROIs), ...
+                    'the label drawn on the image still shows the old name');
+                a.deleteFrameROIs();
+            end
+
+            function tFitLegend()
+                a.gotoFrame(21);
+                a.deleteFrameROIs();
+                m = false(48,52); m(6:14, 6:14) = true;
+                a.addROIRecord(m, [], "mask", "wm", [1 0 0]);
+                a.setPlotMode("roi");
+                a.setPlotPanel(true);
+                a.refreshAll();
+                a.UI.FitModelDrop.Value = 'DKI';
+                a.uiFitDiffusion();
+                want(isfield(a.FitResult, 'Region') && a.FitResult.Region == "wm", ...
+                    'the fit should record which region it describes');
+                nm = string(a.UI.PlotFit.DisplayName);
+                want(contains(nm, "wm"), 'the fitted curve is not named after the region');
+                want(contains(nm, "DKI"), 'the fitted curve does not name the model');
+                a.setPlotPanel(false);
+                a.deleteFrameROIs();
+            end
+
+            function tNameColours()
+                a.gotoFrame(23);
+                a.deleteFrameROIs();
+                m1 = false(48,52); m1(5:10,  5:10)  = true;
+                m2 = false(48,52); m2(20:25, 20:25) = true;
+                a.addROIRecord(m1, [], "mask", "red",    [1 0 0]);
+                a.addROIRecord(m2, [], "mask", "yellow", [0.929 0.694 0.125]);
+                a.refreshAll();
+                sc = a.UI.ROITable.StyleConfigurations;
+                want(height(sc) == 2, 'one style per region name was expected');
+                want(isequal(a.legibleColor([1 0 0]), [1 0 0]), ...
+                    'a colour that already reads well should be left alone');
+                y = a.legibleColor([0.929 0.694 0.125]);
+                want(all(y <= [0.929 0.694 0.125] + 1e-12) && any(y < 0.929), ...
+                    'a pale colour should be darkened for a light table');
+                want(abs(y(1)/y(2) - 0.929/0.694) < 1e-6, 'the hue should be preserved');
+                a.deleteFrameROIs();
+            end
+
+            function tColoursAfterDelete()
+                a.gotoFrame(25);
+                a.deleteFrameROIs();
+                m = false(48,52); m(5:9, 5:9) = true;
+                for q = 1:5
+                    a.addROIRecord(m, [], "mask", a.nextROIName(), a.nextColor());
+                    a.refreshAll();
+                end
+                here = a.roisOnCurrentFrame();
+                cols = vertcat(a.ROIs(here).Color);
+                want(size(unique(cols, 'rows'), 1) == 5, ...
+                    'five regions should have five distinct colours');
+
+                a.ROIs(here(3)) = [];        % remove one from the middle
+                a.refreshAll();
+                a.addROIRecord(m, [], "mask", a.nextROIName(), a.nextColor());
+                a.refreshAll();
+                here = a.roisOnCurrentFrame();
+                cols = vertcat(a.ROIs(here).Color);
+                want(size(unique(cols, 'rows'), 1) == numel(here), ...
+                    'a colour was reused after deleting a region from the middle');
+
+                nm = strings(1, numel(here));
+                for q = 1:numel(here)
+                    nm(q) = a.ROIs(here(q)).Name;
+                end
+                want(numel(unique(nm)) == numel(nm), 'a name was reused as well');
+                a.deleteFrameROIs();
+            end
+
+            function tKeyGuard()
+                f = uifigure('Visible', 'off');
+                cu = onCleanup(@() delete(f)); %#ok<NASGU>
+                want(ImageBrowserApp.isTextEntry(uieditfield(f)), ...
+                    'an edit field must keep its own keystrokes');
+                want(ImageBrowserApp.isTextEntry(uitable(f)), ...
+                    'a table must keep its own keystrokes');
+                want(ImageBrowserApp.isTextEntry(uispinner(f)), ...
+                    'a spinner must keep its own keystrokes');
+                want(~ImageBrowserApp.isTextEntry(uibutton(f)), ...
+                    'a button should not swallow the shortcuts');
+                want(~ImageBrowserApp.isTextEntry([]), ...
+                    'no focused object means the shortcuts apply');
+            end
+
+            function tTableStable()
+                a.gotoFrame(27);
+                a.deleteFrameROIs();
+                m = false(48,52); m(5:9, 5:9) = true;
+                a.addROIRecord(m, [], "mask", "stable", [1 0 0]);
+                a.refreshAll();
+                before = a.UI.ROITable.Data;
+                a.refreshROITable();
+                want(isequaln(before, a.UI.ROITable.Data), ...
+                    'an idle refresh changed the table contents');
+                a.ROIs(a.roisOnCurrentFrame()).Name = "moved";
+                a.refreshROITable();
+                want(~isequaln(before, a.UI.ROITable.Data), ...
+                    'a real change was not picked up');
+                a.deleteFrameROIs();
             end
 
             function tOverlay()
@@ -3839,8 +4428,25 @@ classdef ImageBrowserApp < handle
             end
         end
 
+        function tf = typingInControl(app)
+            %TYPINGINCONTROL  Does a control currently own the keyboard?
+            tf = false;
+            try
+                tf = ImageBrowserApp.isTextEntry(app.UI.Fig.CurrentObject);
+            catch
+                % CurrentObject is unavailable on some releases; assume not.
+            end
+        end
+
         function onKey(app, e)
             app.ModCtrl = any(strcmp(e.Modifier, 'control'));
+            if app.typingInControl()
+                % A table cell, edit field, spinner, dropdown or list has
+                % focus. Its own keys must reach it: an arrow key while
+                % renaming a region used to change frame, and rebuilding the
+                % table under the open editor left the cell stuck.
+                return
+            end
             switch lower(e.Key)
                 case 'rightarrow', app.stepFrame(1);
                 case 'leftarrow',  app.stepFrame(-1);
@@ -3867,16 +4473,19 @@ classdef ImageBrowserApp < handle
 
         %------------------------------------------------------------------
         function onClose(app)
-            if ~isempty(app.ROIs)
+            if ~isempty(app.ROIs) && app.ROIsDirty
                 choice = uiconfirm(app.UI.Fig, ...
-                    sprintf(['%d region(s) of interest are defined. Save them to ' ...
-                    'the base workspace before closing?'], numel(app.ROIs)), ...
+                    sprintf(['%d region(s) of interest have not been exported ' ...
+                    'since they were last changed. Save them to the base ' ...
+                    'workspace before closing?'], numel(app.ROIs)), ...
                     'Close Image Browser', ...
                     'Options', {'Save and close', 'Close without saving', 'Cancel'}, ...
                     'DefaultOption', 1, 'CancelOption', 3);
                 switch choice
                     case 'Save and close'
-                        app.uiExportROISeq();
+                        if ~app.uiExportROISeq()
+                            return   % name dialog cancelled: do not lose the ROIs
+                        end
                     case 'Cancel'
                         return
                 end

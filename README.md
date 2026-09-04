@@ -14,8 +14,6 @@ DKI to that curve.
 ib(vol,'XData',unique(bs),XLabel='b [ms/\mum^2]',DimNames=["b-value","dir"])
 ```
 
-<!-- SCREENSHOT: the main window with a 4-D dataset loaded, a ROI drawn, and the
-     signal plot panel open. Save as docs/screenshots/main.png -->
 ![The main window](main.png)
 
 ---
@@ -120,8 +118,7 @@ column has four tabs:
 - **Display** — colormap, colour limits, window/level, and the overlay.
 - **Analysis** — the signal plot, the x-axis, and the diffusion fit.
 
-<!-- SCREENSHOT: close-up of the right-hand tab strip, ideally the ROI tab with
-     two or three ROIs listed and their statistics. Save as docs/screenshots/roi-tab.png -->
+
 ![The ROI tab](roi-tab.png)
 
 ## Keyboard and mouse
@@ -171,8 +168,6 @@ are sampled evenly to that many tiles. ROI outlines are hidden while the montage
 is showing.
 
 
-
-<!-- SCREENSHOT: montage view of a multi-slice series. Save as docs/screenshots/montage.png -->
 ![Montage view](montage.png)
 
 
@@ -183,7 +178,7 @@ press **New ROI**. Drawn regions stay draggable afterwards; the statistics updat
 as you move them.
 
 Each frame holds any number of named ROIs. The table shows pixel count, mean and
-standard deviation per region, with the union statistics below it. Regions can be
+standard deviation per region, with the combined statistics below it. Regions can be
 
 - copied to a range of frames, for a structure that spans slices;
 - shown from every frame at once (the *sticky* option), dotted for the ones that
@@ -192,6 +187,22 @@ standard deviation per region, with the union statistics below it. Regions can b
 - created from a threshold instead of drawn (**ROI → Auto ROI by threshold**).
 
 NaN pixels are rendered transparent and excluded from all statistics.
+
+### Three controls, three jobs
+
+The ROI table has a **Show** checkbox and a row **selection**, and they are not
+the same thing. Each governs one job and nothing else:
+
+| Control | Governs |
+| --- | --- |
+| **Show** checkbox | which regions are plotted |
+| Row **selection** (click a row) | which regions *Delete selected* and *Copy selected to frames* act on |
+| **Fit region** dropdown, in the Analysis tab | which single region the diffusion fit describes |
+
+So unticking a region removes its curve and takes it out of the fit dropdown, but
+does not delete it. Selecting a row highlights it for deletion but changes
+nothing about the plot or the fit. The dropdown lists only the regions currently
+shown, and always says which one a fit will describe before you press the button.
 
 ### Importing masks
 
@@ -208,7 +219,14 @@ plots one of two things against a dimension of your choosing:
 
 - **Pixel under cursor** — tick *Pixel surfing* to update live as you move, or
   click a pixel to freeze it.
-- **ROI mean** — with an optional ±SD band.
+- **ROI mean** — one curve per shown region, each in that region's own colour,
+  with a legend when there is more than one and a ±SD band when there is only
+  one. Regions are never averaged together.
+
+Drawing the first region on a frame switches the plot from pixel to ROI mean, on
+the assumption that is what you now want to look at. It only happens on that
+first region, so switching back to pixel mode while regions exist is not
+overridden.
 
 The *Sweep over* dropdown selects which dimension varies; with several series
 loaded you can also sweep across series. *From* and *To* restrict the range.
@@ -220,7 +238,10 @@ log options.
 ## DTI and DKI fitting
 
 **Analysis → Fit DTI / DKI to this curve**, or the *Fit current curve* button,
-fits the plotted curve — a single voxel or a ROI mean, one-dimensional:
+fits one curve — a single voxel, or the mean of the region named in the **Fit
+region** dropdown. Several regions can be plotted at once, but a fit always
+describes one of them; the dropdown says which, and the fitted curve is drawn
+dashed in that region's colour.
 
 $$S(b) = S_0 \exp\left(-bD + \tfrac{1}{6}b^2D^2K\right)$$
 
@@ -250,9 +271,6 @@ to report the log-linear estimate alone.
 Results appear in the Analysis tab: $S_0$, $D$ in both mm²/s and µm²/ms, $K$,
 RMSE and $R^2$, and the fitted curve is drawn over the data.
 
-<!-- SCREENSHOT: the Analysis tab after a DKI fit, showing the parameter values,
-     with the fitted curve visible in the plot panel below the image.
-     Save as docs/screenshots/dki-fit.png -->
 ![A DKI fit](dki-fit.png)
 
 **Three things to be aware of.** The quoted ± values are linearised standard
@@ -396,24 +414,4 @@ This is a from-scratch rewrite by Claude (Opus 5) of an internal GUIDE-era MATLA
 series. The original's functionality is preserved, including its workspace
 export formats; the data model, layout, cursor mapping and ROI handling were
 rebuilt on `uifigure` and `uigridlayout`.
-
-<!-- TODO before publishing:
-
-  1. Credits. The original imagebrowser was written by Daniel Otykier (named in
-     roioutline.m) with later contributions. Confirm the full attribution and
-     name people properly here.
-
-  2. Licence. Nothing is chosen yet — add a LICENSE file and state it here.
-     MIT and BSD-3-Clause are the usual choices for MATLAB tools. Check whether
-     Aarhus University has a policy on releasing internally developed software.
-
-  3. Citing. If you want this citable, add a CITATION.cff, and a Zenodo DOI if
-     it is going to be referenced in papers.
-
-  4. Screenshots. Four placeholders above: main.png, roi-tab.png, montage.png,
-     dki-fit.png, all under docs/screenshots/. The DKI one is the most useful to
-     a visitor deciding whether this tool does what they need.
-
-  5. Development note. Decide whether to state that the rewrite was done with
-     Claude (Anthropic). Some readers find that useful context; it is your call.
--->
+The data used to illustrate the App here were acquired by Noam Shemesh.
