@@ -53,6 +53,7 @@ Three files, no build step, no dependencies beyond MATLAB itself:
 | --- | --- |
 | `ImageBrowserApp.m` | The application — one `classdef`, plain text, hand-editable |
 | `ib.m` | The launcher you normally call |
+| `ib2_selftest.m` | A regression suite; see [Testing](#testing) |
 
 
 ## Quick start
@@ -98,7 +99,7 @@ All are name-value arguments to `ib`:
 
 ### Legacy call signatures
 
-Two positional forms from the original `imagebrowser` (see [Background](#background) )  still work:
+Two positional forms from the original `imagebrowser` (see [Acknowledgements](#acknowledgements)) still work:
 
 ```matlab
 ib(vol, mask)                  % load a logical ROI alongside the data
@@ -393,6 +394,34 @@ Everything the app does, in brief. Menu paths in **bold**.
 
 No other dependencies.
 
+## Testing
+
+```matlab
+ib2_selftest
+```
+
+Builds several browsers on synthetic data, drives navigation, colour limits,
+montage, cine, ROIs, curve extraction, overlays, the Bruker reader and the
+diffusion fit, prints a PASS/FAIL line per check and closes the windows again.
+It needs a display, and takes well under a minute. Failures print a stack trace
+naming the line. Called with an output it returns a table, so it drops into a
+larger harness:
+
+```matlab
+r = ib2_selftest();
+assert(all(r.Passed), 'Image browser self test failed.')
+```
+
+Two of the checks are worth singling out, because they test mathematics rather
+than behaviour. The analytic Jacobians of the DKI model are verified against
+**complex-step differentiation** to a relative tolerance of $10^{-12}$. Since
+the model is $\exp$ of a polynomial and therefore analytic, $\mathrm{Im}\,
+f(x+ih)/h$ is exact to machine precision — no truncation term, no cancellation —
+which a finite difference could not achieve here, because $D \sim 10^{-3}$ while
+$b$ reaches $10^{3}$ and the error term carries a factor $b^{3}$. A sign or
+factor slip in $\partial S/\partial D$ or $\partial S/\partial K$ would still
+converge, just more slowly, so a parameter-recovery test alone would not catch
+it.
 
 ## Known limitations
 
