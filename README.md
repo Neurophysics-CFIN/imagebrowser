@@ -91,7 +91,7 @@ All are name-value arguments to `ib`:
 | `Colormap` | Initial colormap, default `"gray"` |
 | `CLim` | Initial colour limits |
 | `XData` | x values for the signal plot — b-values, echo times, inversion times |
-| `XLabel` | x-axis label for the signal plot |
+| `XLabel` | x-axis label for the signal plot; left out, the axis is named after the dimension being swept |
 | `Overlay` | A second dataset, alpha-blended over the base image |
 | `ROI` | An initial logical mask |
 | `Theme` | `"system"` (default), `"light"` or `"dark"` |
@@ -110,8 +110,20 @@ ib([128 128 30 163], 'int16')  % read a headerless Bruker 2dseq in pwd
 
 The image fills the window, with a status line underneath showing the series,
 the frame, the pixel under the pointer and its value, and the current colour
-limits. A slider and spinner appear for each navigable dimension. The right-hand
-column has four tabs:
+limits. A slider and spinner appear for each navigable dimension.
+
+To make the anatomy larger, use **Zoom in**, **Zoom out** and **Fit** at the
+right of the button bar (also in the **View** menu), or <kbd>Ctrl</kbd> + scroll
+over the image to zoom about the pointer. Once zoomed, <kbd>Shift</kbd> + drag or
+a middle-button drag moves the view. The zoom is kept as you change slice.
+
+To give the image pane more or less of the window, drag the divider between
+the image and the sidebar, or, with the signal plot open, the divider above the
+plot. The pointer turns into a resize arrow over a divider, and a double-click
+puts it back where it started. Each drag stops before the image pane gets too
+small.
+
+The right-hand column has four tabs:
 
 - **Series** — the list of loaded series, and a flat list of every frame in the
   active one.
@@ -132,8 +144,11 @@ column has four tabs:
 | <kbd>↑</kbd> <kbd>↓</kbd> | Previous / next series |
 | <kbd>Space</kbd> | Play / pause the cine loop |
 | Scroll wheel | Change frame |
-| <kbd>Ctrl</kbd> + scroll | Zoom about the pointer |
+| <kbd>Ctrl</kbd> + scroll (<kbd>⌘</kbd> + scroll on a Mac) | Zoom about the pointer |
+| <kbd>Shift</kbd> + drag, or middle-drag | Pan the zoomed image |
+| Drag a divider (double-click resets) | Resize the image, sidebar and plot panes |
 | **Right-drag on the image** | Window / level — horizontal sets level, vertical sets width |
+| <kbd>+</kbd> / <kbd>-</kbd> | More / less contrast, in 10% steps |
 | <kbd>C</kbd> | Toggle the colorbar |
 | <kbd>L</kbd> | Lock the colour limits across frames |
 | <kbd>R</kbd> | Reset the colour limits to the full range |
@@ -186,6 +201,11 @@ standard deviation per region, with the combined statistics below it. Regions ca
   belong elsewhere;
 - hidden individually without deleting them;
 - created from a threshold instead of drawn (**ROI → Auto ROI by threshold**).
+  The dialog also asks which slices to threshold: the current one, a range such
+  as `2-7`, a list, or `all`. Each slice is thresholded on its own image, and
+  all of them get one name and one colour. The slices are taken along the
+  dimension the arrow keys step through (the dropdown next to the fps spinner),
+  with every other dimension left where it is.
 
 NaN pixels are rendered transparent and excluded from all statistics.
 
@@ -210,8 +230,15 @@ shown, and always says which one a fit will describe before you press the button
 **File → Import → ROI from workspace** accepts
 
 - a 2-D logical mask matching the current image;
-- a 3-D logical stack with one mask per frame;
+- a stack with one mask per frame, e.g. rows × cols × slices for a 3-D series;
+- a stack with one mask per position along one navigable dimension, e.g. a
+  rows × cols × slices mask on a rows × cols × slices × b series, which lands
+  on every slice at the b-value on screen;
 - a `ROIseq` struct with `.ROIs` and `.Names`.
+
+A stack becomes one ROI per non-empty plane. Each one is named after the
+variable, with no slice number added, and they all share one colour. A mask
+whose rows and columns differ from the image is refused with a message.
 
 ## Signal curves
 
@@ -235,6 +262,10 @@ loaded you can also sweep across series. *From* and *To* restrict the range.
 The x-axis is whatever you passed as `XData`, or can be set at run time from a
 workspace variable (**Analysis → Set x-axis from workspace**). Both axes have
 log options.
+
+The axis label follows the swept dimension unless you give one: sweeping slices
+labels the axis `slice`, matching the plot title. Type a label in the *Label*
+field to override it, and clear that field to go back to the automatic name.
 ![signal](plot-tab.png)
 ## DTI and DKI fitting
 
@@ -348,7 +379,8 @@ Everything the app does, in brief. Menu paths in **bold**.
 - Colour limits: full min–max, robust percentile clipping (0–25% adjustable),
   or manual entry; lockable across frames
 - Brightness and contrast buttons in ±10% steps, or right-drag window/level
-- Zoom about the pointer, pan, reset view
+- Zoom in / out / fit buttons, zoom about the pointer, Shift-drag pan; the
+  zoom survives a change of slice
 - NaN pixels drawn transparent and excluded from every statistic
 - RGB arrays displayed as colour, with window/level still active
 - Alpha-blended overlay of a second dataset, own colormap, opacity and threshold
@@ -361,12 +393,13 @@ Everything the app does, in brief. Menu paths in **bold**.
 
 **Regions of interest**
 - Draw polygon, freehand, ellipse, rectangle, circle or point; all stay draggable
-- Threshold ROI, selecting pixels above **or** below a value
-  (**ROI → Auto ROI by threshold**)
+- Threshold ROI, selecting pixels above **or** below a value, on one slice or
+  across a range of slices (**ROI → Auto ROI by threshold**)
 - Any number of named ROIs per frame, individually hideable
 - Per-ROI count, mean and SD, plus union statistics; full table via `roiStats`
 - Copy a ROI to a range of frames; show ROIs from all frames at once
-- Import a 2-D mask, a per-frame 3-D stack, or the original app's `ROIseq` struct
+- Import a 2-D mask, a per-frame or per-slice stack, or the original app's
+  `ROIseq` struct
 
 **Curves and fitting**
 - Pixel-under-cursor or ROI-mean curves, with an optional ±SD band

@@ -22,7 +22,8 @@ classdef ImageBrowserApp < handle
     %     Colormap    (char/string/Mx3) initial colormap, default "gray"
     %     CLim        (1x2) initial colour limits
     %     XData       (vector) x-axis values for the signal plot, e.g. b-values
-    %     XLabel      (string) x-axis label for the signal plot
+    %     XLabel      (string) x-axis label for the signal plot; when it is
+    %                 not given the axis is named after the sweep dimension
     %     Overlay     (array)  second dataset displayed on top with alpha blending
     %     ROI         (logical) initial ROI mask, 2-D or matching the frame count
     %     Theme       "system" | "light" | "dark"
@@ -36,6 +37,10 @@ classdef ImageBrowserApp < handle
     %     R               reset colour limits            M       toggle montage
     %     Scroll wheel    change frame            Ctrl+scroll     zoom about cursor
     %     Right-drag      window/level (brightness/contrast)
+    %     Shift-drag or middle-drag   pan when zoomed in (also the Zoom
+    %                     in / Zoom out / Fit buttons above the image)
+    %     Drag the divider left of the sidebar, or above the signal plot, to
+    %     resize the panes; double-click it to reset.
     %
     %   See also IMAGEBROWSER2.
 
@@ -54,7 +59,8 @@ classdef ImageBrowserApp < handle
 
     properties
         XData    (1,:) double = []      % x values for the signal plot
-        XLabel   (1,1) string = "Frame" % x label for the signal plot
+        XLabel   (1,1) string = "Frame" % x label for the signal plot; set it
+                                        % to "" to follow the sweep dimension
     end
 
     properties (SetAccess = private)
@@ -69,6 +75,7 @@ classdef ImageBrowserApp < handle
     %======================================================================
     properties (Access = private)
         UI          struct = struct()   % all graphics handles
+        XLabelAuto  (1,1) logical = true % x label follows the sweep dimension
         Overlay     struct = struct('Data',[],'CLim',[0 1],'Colormap',"hot", ...
             'Alpha',0.5,'Threshold',-Inf,'Enabled',false)
         CLimStore   (1,2) double = [0 1]
@@ -93,6 +100,11 @@ classdef ImageBrowserApp < handle
         PlotRange   (1,2) double = [1 1]
         LastPixel   (1,2) double = [NaN NaN]
         WLDrag      struct = struct('Active',false,'Origin',[0 0],'CLim',[0 1])
+        PanDrag     struct = struct('Active',false,'Origin',[0 0])  % grabbed point
+        SplitDrag   struct = struct('Active',false,'Which',"",'Origin',[0 0], ...
+            'Start',0,'Limits',[0 0])          % divider being dragged
+        SidebarW    (1,1) double            % current sidebar width, pixels
+        PlotH       (1,1) double            % current plot panel height, pixels
         ModCtrl     (1,1) logical = false
         FunSpec     struct = struct('Fun',[],'X',[],'Par',[])   % user function overlay
         FitResult   struct = struct()                           % last DTI/DKI fit
@@ -107,6 +119,13 @@ classdef ImageBrowserApp < handle
     properties (Constant, Access = private)
         SidebarWidth = 320
         PlotHeight   = 210
+        SplitterSize = 8        % thickness of the draggable dividers
+        MinSidebar   = 260      % smallest sidebar a divider drag allows; any
+                                % narrower and the four tab titles overflow
+        MinPlot      = 100      % smallest plot panel
+        MinImageW    = 300      % least width a divider drag leaves the image
+        MinImageH    = 150      % least height a divider drag leaves the image
+        ZoomStep     = 1.5      % view scale per press of Zoom in / Zoom out
         AppVersion   = "3.0"
     end
 
@@ -123,7 +142,7 @@ classdef ImageBrowserApp < handle
                 opts.Colormap    = "gray"
                 opts.CLim        double = []
                 opts.XData       (1,:) double = []
-                opts.XLabel      (1,1) string = "Frame"
+                opts.XLabel      (1,1) string
                 opts.Overlay     = []
                 opts.ROI         = []
                 opts.Theme       (1,1) string = "system"
@@ -133,7 +152,10 @@ classdef ImageBrowserApp < handle
             app.HasIPT = ~isempty(which('drawpolygon'));
             app.ThemeChoice = opts.Theme;
             app.XData  = opts.XData;
-            app.XLabel = opts.XLabel;
+            app.XLabelAuto = ~isfield(opts, 'XLabel');
+            if ~app.XLabelAuto
+                app.XLabel = opts.XLabel;
+            end
 
             app.buildUI(opts.Name);
 
@@ -161,7 +183,7 @@ classdef ImageBrowserApp < handle
                 app.CLimMode = "manual";
                 app.setCLim(opts.CLim);
             end
-            app.setXLabel(opts.XLabel);
+            app.syncXLabel();
             if ischar(opts.Colormap) || isstring(opts.Colormap)
                 app.setColormap(opts.Colormap);
             end
@@ -302,14 +324,18 @@ classdef ImageBrowserApp < handle
             if nargin < 2, combine = true; end
             sel = app.roisOnCurrentFrame();
             img = app.currentImage();
-            m = false(size(img,1), size(img,2));
+            sz = [size(img,1), size(img,2)];
+            m = false(sz);
+            % A mask of another size cannot be combined with this frame;
+            % leave it out rather than fail every refresh.
+            sel = sel(arrayfun(@(k) isequal(size(app.ROIs(k).Mask), sz), sel));
             if isempty(sel), return; end
             if combine
                 for i = sel
                     m = m | app.ROIs(i).Mask;
                 end
             else
-                m = false(size(img,1), size(img,2), numel(sel));
+                m = false([sz, numel(sel)]);
                 for k = 1:numel(sel)
                     m(:,:,k) = app.ROIs(sel(k)).Mask;
                 end
@@ -336,20 +362,29 @@ classdef ImageBrowserApp < handle
             app.UI.Fig.WindowButtonUpFcn    = @(~,~) app.onMouseUp();
             app.UI.Fig.WindowScrollWheelFcn = @(~,e) app.onScroll(e);
             app.UI.Fig.WindowKeyPressFcn    = @(~,e) app.onKey(e);
+            app.UI.Fig.WindowKeyReleaseFcn  = @(~,e) app.onKeyRelease(e);
 
             app.buildMenus();
 
-            root = uigridlayout(app.UI.Fig, [1 2]);
-            root.ColumnWidth = {'1x', app.SidebarWidth};
+            % Image | divider | sidebar. Dragging the divider trades width
+            % between the image and the sidebar.
+            app.SidebarW = app.SidebarWidth;
+            app.PlotH = app.PlotHeight;
+            root = uigridlayout(app.UI.Fig, [1 3]);
+            root.ColumnWidth = {'1x', app.SplitterSize, app.SidebarW};
             root.RowHeight   = {'1x'};
             root.Padding     = [6 6 6 6];
-            root.ColumnSpacing = 6;
+            root.ColumnSpacing = 0;
             app.UI.Root = root;
+            app.UI.SplitSide = app.makeSplitter(root, "side");
+            app.UI.SplitSide.Layout.Row = 1; app.UI.SplitSide.Layout.Column = 2;
 
             % ---------------- left column ----------------------------------
-            left = uigridlayout(root, [5 1]);
+            % Rows: buttons, image, navigation, status, divider, plot. The
+            % last two have no height until the plot panel is opened.
+            left = uigridlayout(root, [6 1]);
             left.Layout.Row = 1; left.Layout.Column = 1;
-            left.RowHeight = {'fit', '1x', 'fit', 'fit', 0};
+            left.RowHeight = {'fit', '1x', 'fit', 'fit', 0, 0};
             left.Padding = [0 0 0 0];
             left.RowSpacing = 4;
             app.UI.Left = left;
@@ -381,16 +416,32 @@ classdef ImageBrowserApp < handle
             st.FontName = 'Consolas';
             app.UI.Status = st;
 
+            app.UI.SplitPlot = app.makeSplitter(left, "plot");
+            app.UI.SplitPlot.Layout.Row = 5; app.UI.SplitPlot.Layout.Column = 1;
+            app.UI.SplitPlot.Visible = 'off';
             app.buildPlotPanel(left);
 
             % ---------------- right column ---------------------------------
             tg = uitabgroup(root);
-            tg.Layout.Row = 1; tg.Layout.Column = 2;
+            tg.Layout.Row = 1; tg.Layout.Column = 3;
             app.UI.Tabs = tg;
             app.buildSeriesTab(uitab(tg, 'Title', 'Series'));
             app.buildROITab(uitab(tg, 'Title', 'ROI'));
             app.buildDisplayTab(uitab(tg, 'Title', 'Display'));
             app.buildAnalysisTab(uitab(tg, 'Title', 'Analysis'));
+        end
+
+        function p = makeSplitter(app, parent, which)
+            %MAKESPLITTER  A divider that resizes the panes either side of it
+            %   when dragged; a double-click puts it back where it started.
+            if which == "side"
+                tip = 'Drag to resize the image and the sidebar; double-click to reset';
+            else
+                tip = 'Drag to resize the image and the plot; double-click to reset';
+            end
+            p = uipanel(parent, 'BorderType', 'none', 'Tooltip', tip, ...
+                'ButtonDownFcn', @(~,~) app.startSplit(which, ...
+                app.UI.Fig.CurrentPoint, app.UI.Fig.SelectionType));
         end
 
         %------------------------------------------------------------------
@@ -422,7 +473,11 @@ classdef ImageBrowserApp < handle
                 'MenuSelectedFcn', @(~,~) app.toggleMontage());
             app.UI.MenuPlotPanel = uimenu(m, 'Text', 'Signal &plot panel', ...
                 'MenuSelectedFcn', @(~,~) app.togglePlotPanel());
-            uimenu(m, 'Text', '&Reset zoom', 'Separator', 'on', ...
+            uimenu(m, 'Text', 'Zoom &in', 'Separator', 'on', ...
+                'MenuSelectedFcn', @(~,~) app.zoomStep(1 / app.ZoomStep));
+            uimenu(m, 'Text', 'Zoom &out', ...
+                'MenuSelectedFcn', @(~,~) app.zoomStep(app.ZoomStep));
+            uimenu(m, 'Text', '&Reset zoom', ...
                 'MenuSelectedFcn', @(~,~) app.resetView());
             mt = uimenu(m, 'Text', '&Theme', 'Separator', 'on');
             app.UI.MenuTheme = gobjects(1,3);
@@ -496,9 +551,9 @@ classdef ImageBrowserApp < handle
 
         %------------------------------------------------------------------
         function buildDisplayBar(app, parent)
-            g = uigridlayout(parent, [1 7]);
+            g = uigridlayout(parent, [1 10]);
             g.Layout.Row = 1; g.Layout.Column = 1;
-            g.ColumnWidth = {90, 90, 90, 90, 90, 90, '1x'};
+            g.ColumnWidth = {90, 90, 90, 90, 90, 90, '1x', 70, 70, 50};
             g.RowHeight = {26};
             g.Padding = [0 0 0 0];
             g.ColumnSpacing = 4;
@@ -521,6 +576,22 @@ classdef ImageBrowserApp < handle
             app.UI.BtnPlotPanel = uibutton(g, 'state', 'Text', 'Plot', ...
                 'Tooltip', 'Show the signal plot panel', ...
                 'ValueChangedFcn', @(s,~) app.setPlotPanel(s.Value));
+
+            % View controls sit apart at the right-hand end.
+            b = uibutton(g, 'push', 'Text', 'Zoom in', ...
+                'Tooltip', ['Enlarge the image about the centre of the view. ' ...
+                'Ctrl + scroll zooms about the pointer; Shift + drag or ' ...
+                'middle-drag pans.'], ...
+                'ButtonPushedFcn', @(~,~) app.zoomStep(1 / app.ZoomStep));
+            b.Layout.Column = 8;
+            b = uibutton(g, 'push', 'Text', 'Zoom out', ...
+                'Tooltip', 'Shrink the image about the centre of the view', ...
+                'ButtonPushedFcn', @(~,~) app.zoomStep(app.ZoomStep));
+            b.Layout.Column = 9;
+            b = uibutton(g, 'push', 'Text', 'Fit', ...
+                'Tooltip', 'Show the whole image', ...
+                'ButtonPushedFcn', @(~,~) app.resetView());
+            b.Layout.Column = 10;
         end
 
         %------------------------------------------------------------------
@@ -585,7 +656,7 @@ classdef ImageBrowserApp < handle
         %------------------------------------------------------------------
         function buildPlotPanel(app, parent)
             p = uipanel(parent, 'Title', 'Signal plot', 'Visible', 'off');
-            p.Layout.Row = 5; p.Layout.Column = 1;
+            p.Layout.Row = 6; p.Layout.Column = 1;
             app.UI.PlotPanel = p;
             g = uigridlayout(p, [1 1]);
             g.Padding = [4 4 4 4];
@@ -876,6 +947,8 @@ classdef ImageBrowserApp < handle
 
             lab(11, 'Label');
             e = uieditfield(g, 'text', 'Value', 'Frame', ...
+                'Tooltip', ['Label for the x axis. Leave it empty to name the ' ...
+                'axis after the dimension being swept.'], ...
                 'ValueChangedFcn', @(s,~) app.setXLabel(string(s.Value)));
             e.Layout.Row = 11; e.Layout.Column = 2;
             app.UI.XLabelEdit = e;
@@ -1145,6 +1218,39 @@ classdef ImageBrowserApp < handle
                 [c{:}] = ind2sub(sz, v);
                 sub = cell2mat(c);
             end
+        end
+
+        function lim = slideInside(lim, bounds)
+            %SLIDEINSIDE  Move LIM inside BOUNDS keeping its span, which is
+            %   capped at the span of BOUNDS.
+            w = min(diff(lim), diff(bounds));
+            lo = min(max(lim(1), bounds(1)), bounds(2) - w);
+            lim = [lo, lo + w];
+        end
+
+        function v = parseIndexList(str, n)
+            %PARSEINDEXLIST  Read "3", "2-7", "2:7", "1 4 6", "1,4,6" or
+            %   "all" as a sorted list of indices within 1..N. Anything it
+            %   cannot read, or a list with nothing in range, gives [].
+            v = zeros(1, 0);
+            s = lower(strtrim(string(str)));
+            if s == "all" || s == ":"
+                v = 1:n;
+                return
+            end
+            s = regexprep(s, '[\[\],;]', ' ');
+            s = regexprep(s, '\s*[-:]\s*', '-');
+            parts = split(strtrim(s));
+            for p = parts(:)'
+                if isempty(regexp(char(p), '^\d+(-\d+)?$', 'once'))
+                    v = zeros(1, 0);
+                    return
+                end
+                ab = str2double(split(p, "-"));
+                v = [v, min(ab):max(ab)]; %#ok<AGROW>
+            end
+            v = unique(v);
+            v = v(v >= 1 & v <= n);
         end
     end
 
@@ -1767,8 +1873,13 @@ classdef ImageBrowserApp < handle
         function setPlotPanel(app, tf)
             tf = logical(tf);
             app.UI.PlotPanel.Visible = matlab.lang.OnOffSwitchState(tf);
+            app.UI.SplitPlot.Visible = matlab.lang.OnOffSwitchState(tf);
             rh = app.UI.Left.RowHeight;
-            if tf, rh{5} = app.PlotHeight; else, rh{5} = 0; end
+            if tf
+                rh{5} = app.SplitterSize; rh{6} = app.PlotH;
+            else
+                rh{5} = 0; rh{6} = 0;
+            end
             app.UI.Left.RowHeight = rh;
             app.UI.BtnPlotPanel.Value = tf;
             app.UI.MenuPlotPanel.Checked = matlab.lang.OnOffSwitchState(tf);
@@ -1834,9 +1945,13 @@ classdef ImageBrowserApp < handle
     methods (Access = private)
 
         function idx = roisOnCurrentFrame(app)
+            idx = app.roisOnFrames(app.frameLinear());
+        end
+
+        function idx = roisOnFrames(app, frames)
             if isempty(app.ROIs), idx = []; return; end
             idx = find([app.ROIs.Series] == app.SeriesIndex & ...
-                [app.ROIs.Frame]  == app.frameLinear());
+                ismember([app.ROIs.Frame], frames));
         end
 
         function idx = roisInSeries(app)
@@ -1844,14 +1959,21 @@ classdef ImageBrowserApp < handle
             idx = find([app.ROIs.Series] == app.SeriesIndex);
         end
 
-        function c = nextColor(app)
+        function c = nextColor(app, frames)
             %NEXTCOLOR  First palette colour not already in use on this frame.
             %   Counting the regions is not enough: delete the third of five
             %   and the count says four, so the next region would reuse the
             %   fifth colour. Colours already on the frame are read back
             %   instead, matching how names are chosen.
+            %
+            %   NEXTCOLOR(APP, FRAMES) finds a colour free on all of FRAMES,
+            %   for a region that spans slices and keeps one colour throughout.
             pal = app.ROIColors;
-            here = app.roisOnCurrentFrame();
+            if nargin < 2
+                here = app.roisOnCurrentFrame();
+            else
+                here = app.roisOnFrames(frames);
+            end
             used = false(1, size(pal, 1));
             for k = here
                 [d, i] = min(vecnorm(pal - double(app.ROIs(k).Color(:))', 2, 2));
@@ -2333,30 +2455,82 @@ classdef ImageBrowserApp < handle
                 return
             end
             lo = double(min(img(:))); hi = double(max(img(:)));
+            prompt = {sprintf('Threshold (%g - %g):', lo, hi), ...
+                'Select values BELOW the threshold? (0 or 1):'};
             def = {num2str(0.9*lo + 0.1*hi), '0'};
-            answer = inputdlg({sprintf('Threshold (%g - %g):', lo, hi), ...
-                'Select values BELOW the threshold? (0 or 1):'}, ...
-                'Auto ROI by threshold', 1, def);
+            % The extra positions run along the dimension the arrow keys step
+            % through, so on a slice x b-value series "all" means every slice
+            % at the b-value on screen.
+            k = app.cineDim();
+            ns = app.Series(app.SeriesIndex).NavSize;
+            multi = ~isempty(ns) && ns(k) > 1;
+            if multi
+                dn = app.Series(app.SeriesIndex).DimNames(k);
+                prompt{3} = sprintf(['Apply to %s: one number, a range such ' ...
+                    'as 1-%d, or all (current %d):'], dn, ns(k), app.Sub(k));
+                def{3} = num2str(app.Sub(k));
+            end
+            answer = inputdlg(prompt, 'Auto ROI by threshold', 1, def);
             if isempty(answer), return; end
             thr = str2double(answer{1});
             if ~isfinite(thr), return; end
             below = str2double(answer{2}) == 1;
-            if below
-                mask = img <= thr;
+            if multi
+                pos = ImageBrowserApp.parseIndexList(answer{3}, ns(k));
+                if isempty(pos)
+                    uialert(app.UI.Fig, sprintf(['"%s" is not a %s number, ' ...
+                        'range or "all" within 1-%d.'], answer{3}, dn, ns(k)), ...
+                        'Auto ROI');
+                    return
+                end
+                n = app.autoROI(thr, below, k, pos);
             else
-                mask = img >= thr;
+                n = app.autoROI(thr, below);
             end
-            if ~any(mask(:))
+            if n == 0
                 uialert(app.UI.Fig, 'The threshold selects no pixels.', 'Auto ROI');
-                return
+            end
+        end
+
+        function n = autoROI(app, thr, below, k, pos)
+            %AUTOROI  Threshold ROI on the current frame, or with K and POS
+            %   on every frame at positions POS along navigable dimension K,
+            %   the other dimensions held where they are. All of them share one
+            %   name and one colour, so a structure spanning slices reads as a
+            %   single region. Frames the threshold leaves empty get none.
+            %   Returns the number of ROIs added.
+            si = app.SeriesIndex;
+            if nargin < 5
+                frames = app.frameLinear();
+            else
+                ns = app.Series(si).NavSize;
+                frames = zeros(1, numel(pos));
+                for i = 1:numel(pos)
+                    sub = app.Sub; sub(k) = pos(i);
+                    frames(i) = ImageBrowserApp.sub2linear(ns, sub);
+                end
             end
             if below
                 nm = sprintf('thr<=%g', thr);
             else
                 nm = sprintf('thr>=%g', thr);
             end
-            app.addROIRecord(mask, [], "mask", nm, app.nextColor());
-            app.refreshAll();
+            col = app.nextColor(frames);
+            n = 0;
+            for f = frames
+                img = app.imageAt(si, f);
+                if below
+                    mask = img <= thr;
+                else
+                    mask = img >= thr;
+                end
+                if ~any(mask(:)), continue; end
+                app.addROIRecord(mask, [], "mask", nm, col, si, f);
+                n = n + 1;
+            end
+            if n > 0
+                app.refreshAll();
+            end
         end
 
         function uiCopyROIToFrames(app)
@@ -2390,9 +2564,18 @@ classdef ImageBrowserApp < handle
         end
 
         %------------------------------------------------------------------
-        function importROIData(app, data, name)
-            %IMPORTROIDATA  Accept legacy ROI formats.
+        function n = importROIData(app, data, name)
+            %IMPORTROIDATA  Accept a mask, a stack of masks, or the legacy
+            %   ROIseq struct. Returns the number of ROIs added.
+            %
+            %   A stack is matched to frames by its plane count: one plane per
+            %   frame of the series, or one per position along a single
+            %   navigable dimension, so a rows x cols x slices mask on a
+            %   rows x cols x slices x b series lands on every slice at the
+            %   b-value on screen. Every plane keeps the variable's name and
+            %   one colour, so a structure spanning slices reads as one region.
             if nargin < 3, name = "imported"; end
+            n = 0;
             si = app.SeriesIndex;
             img = app.currentImage();
             nr = size(img,1); nc = size(img,2);
@@ -2401,42 +2584,79 @@ classdef ImageBrowserApp < handle
             if isstruct(data) && isfield(data, 'ROIs')
                 names = {};
                 if isfield(data, 'Names'), names = data.Names; end
+                skipped = 0;
                 for j = 1:numel(data.ROIs)
                     if j > nF, break; end
                     R = data.ROIs{j};
                     if isempty(R), continue; end
                     for k = 1:size(R, 3)
                         m = logical(R(:,:,k));
-                        if size(m,1) ~= nr || size(m,2) ~= nc, continue; end
+                        if size(m,1) ~= nr || size(m,2) ~= nc
+                            skipped = skipped + 1;
+                            continue
+                        end
                         if numel(names) >= j && numel(names{j}) >= k
                             nm = string(names{j}{k});
+                        elseif size(R, 3) == 1
+                            nm = name;
                         else
-                            nm = name + j + "_" + k;
+                            nm = name + "_" + k;
                         end
-                        app.addROIRecord(m, [], "mask", nm, app.nextColor(), si, j);
+                        app.addROIRecord(m, [], "mask", nm, app.nextColor(j), si, j);
+                        n = n + 1;
                     end
+                end
+                if skipped > 0
+                    uialert(app.UI.Fig, sprintf(['%d mask(s) were skipped because ' ...
+                        'they are not %dx%d like the image.'], skipped, nr, nc), ...
+                        'Import ROI', 'Icon', 'warning');
                 end
 
             elseif islogical(data) || isnumeric(data)
-                data = logical(squeeze(data));
-                if ismatrix(data)
-                    if size(data,1) == nr && size(data,2) == nc
-                        app.addROIRecord(data, [], "mask", name, app.nextColor());
-                    else
-                        uialert(app.UI.Fig, 'Mask size does not match the current image.', 'Import ROI');
+                sz = size(data);
+                if sz(1) ~= nr || sz(2) ~= nc
+                    uialert(app.UI.Fig, sprintf(['The mask is %s but the image ' ...
+                        'is %dx%d.'], join(string(sz), "x"), nr, nc), 'Import ROI');
+                    return
+                end
+                if ~islogical(data)
+                    data = data ~= 0 & ~isnan(data);
+                end
+                planes = prod(sz(3:end));
+                data = reshape(data, nr, nc, planes);
+                ns = app.Series(si).NavSize;
+                if planes == 1
+                    frames = app.frameLinear();
+                elseif planes == nF
+                    frames = 1:nF;
+                else
+                    % One plane per position along a single dimension; the
+                    % arrow-key dimension wins if several have that length.
+                    k = app.cineDim();
+                    if numel(ns) < k || ns(k) ~= planes
+                        k = find(ns == planes, 1);
+                    end
+                    if isempty(k)
+                        uialert(app.UI.Fig, sprintf(['The mask has %d planes, ' ...
+                            'but the series has %d frames (%s).'], planes, nF, ...
+                            join(string(ns), "x")), 'Import ROI');
                         return
                     end
-                elseif ndims(data) == 3
-                    if size(data,3) == nF
-                        for j = 1:nF
-                            if any(any(data(:,:,j)))
-                                app.addROIRecord(data(:,:,j), [], "mask", ...
-                                    name + j, app.nextColor(), si, j);
-                            end
-                        end
-                    else
-                        app.addROIRecord(data(:,:,1), [], "mask", name, app.nextColor());
+                    frames = zeros(1, planes);
+                    for j = 1:planes
+                        sub = app.Sub; sub(k) = j;
+                        frames(j) = ImageBrowserApp.sub2linear(ns, sub);
                     end
+                end
+                used = find(any(any(data, 1), 2));
+                if isempty(used)
+                    uialert(app.UI.Fig, 'The mask selects no pixels.', 'Import ROI');
+                    return
+                end
+                col = app.nextColor(frames(used));
+                for j = used(:)'
+                    app.addROIRecord(data(:,:,j), [], "mask", name, col, si, frames(j));
+                    n = n + 1;
                 end
             end
             app.ROIsDirty = true;
@@ -2533,14 +2753,41 @@ classdef ImageBrowserApp < handle
         end
 
         function setXLabel(app, s)
-            app.XLabel = string(s);
-            app.UI.XLabelEdit.Value = char(app.XLabel);
+            %SETXLABEL  Give the signal plot an explicit x-axis label.
+            %   An empty label hands the axis back to the sweep dimension name.
+            s = string(s);
+            app.XLabelAuto = (strlength(strtrim(s)) == 0);
+            if ~app.XLabelAuto
+                app.XLabel = s;
+            end
+            app.syncXLabel();
             app.refreshPlot();
+        end
+
+        function syncXLabel(app)
+            %SYNCXLABEL  Keep XLabel and its edit field in step with the sweep.
+            %   Without an explicit label the axis is named after whatever the
+            %   frame slider steps through, so that it agrees with the plot
+            %   title ("2 ROIs over slice" over an axis reading "slice").
+            if app.XLabelAuto
+                if app.seriesCount() > 0
+                    app.XLabel = string(app.sweepName());
+                else
+                    app.XLabel = "Frame";
+                end
+            end
+            if isfield(app.UI, 'XLabelEdit') && isvalid(app.UI.XLabelEdit)
+                if ~strcmp(app.UI.XLabelEdit.Value, char(app.XLabel))
+                    app.UI.XLabelEdit.Value = char(app.XLabel);
+                end
+            end
         end
 
         function clearXData(app)
             app.XData = [];
-            app.setXLabel("Frame");
+            app.XLabelAuto = true;
+            app.syncXLabel();
+            app.refreshPlot();
         end
 
         function updatePlotScales(app)
@@ -2690,6 +2937,7 @@ classdef ImageBrowserApp < handle
 
         function refreshPlot(app)
             if ~isfield(app.UI, 'PlotAxes') || ~isvalid(app.UI.PlotAxes), return; end
+            app.syncXLabel();
             if ~logical(app.UI.PlotPanel.Visible), return; end
             ax = app.UI.PlotAxes;
             app.clearRoiCurves();
@@ -3505,8 +3753,11 @@ classdef ImageBrowserApp < handle
                 'Up / Down arrow         previous / next series'
                 'Space                   play / pause the cine loop'
                 'Scroll wheel            change frame'
-                'Ctrl + scroll wheel     zoom about the pointer'
+                'Ctrl + scroll wheel     zoom about the pointer (Cmd on a Mac)'
+                'Shift-drag, middle-drag pan the zoomed image'
+                'Drag a divider          resize image, sidebar and plot'
                 'Right-drag on image     window / level'
+                '+ / -                   more / less contrast'
                 'C                       toggle the colorbar'
                 'L                       lock the colour limits'
                 'R                       reset the colour limits'
@@ -3651,6 +3902,13 @@ classdef ImageBrowserApp < handle
             record("controls keep their own keystrokes", @tKeyGuard);
             record("the ROI table is not rebuilt idly", @tTableStable);
             record("dirty flag tracks exports",        @tDirtyFlag);
+            record("threshold ROI across slices",      @tAutoAcross);
+            record("volume mask keeps one name",       @tImportVolume);
+            record("a mismatched mask is tolerated",   @tMismatchedMask);
+            record("slice lists parse",                @tParseIndexList);
+            record("zoom, pan and fit",                @tZoomPan);
+            record("+ and - change contrast both ways", @tContrastKeys);
+            record("dividers resize the panes",        @tSplitters);
             record("add and remove series",            @tSeries);
             record("theme switching",                  @tTheme);
             record("construct from cell array",        @tCell);
@@ -3666,6 +3924,7 @@ classdef ImageBrowserApp < handle
             record("log-linear stage alone",           @tFitLogLinear);
             record("fit rejects too few points",       @tFitGuards);
             record("fit tolerates noise",              @tFitNoise);
+            record("x label follows the sweep",        @tXLabelAuto);
 
             for k = 1:numel(apps)
                 try
@@ -3718,6 +3977,22 @@ classdef ImageBrowserApp < handle
                 a = ImageBrowserApp(vol4, 'Name', 'selftest 4D', ...
                     'DimNames', ["slice" "b"], 'XData', 0:8, 'XLabel', "b");
                 apps{end+1} = a;
+            end
+
+            function tXLabelAuto()
+                bx = ImageBrowserApp(vol4, 'Name', 'selftest xlabel', ...
+                    'DimNames', ["slice" "b"]);
+                apps{end+1} = bx;
+                want(bx.XLabel == string(bx.sweepName()), ...
+                    'the default x label does not name the sweep dimension');
+                bx.setXLabel("b [ms/um^2]");
+                want(bx.XLabel == "b [ms/um^2]", 'an explicit x label was not kept');
+                bx.setSweepDim(2);
+                want(bx.XLabel == "b [ms/um^2]", 'an explicit x label was overwritten');
+                bx.setXLabel("");
+                want(bx.XLabel == "b", 'an empty label did not restore the automatic one');
+                bx.setSweepDim(1);
+                want(bx.XLabel == "slice", 'the automatic label did not follow the sweep');
             end
 
             function tNavDims()
@@ -3986,6 +4261,189 @@ classdef ImageBrowserApp < handle
                 a.deleteFrameROIs();
                 want(a.ROIsDirty, 'deleting should mark the set dirty');
                 a.ROIsDirty = false;
+            end
+
+            function tAutoAcross()
+                a.gotoFrame(sub2ind([6 9], 2, 6));     % slice 2, b index 6
+                n0 = numel(a.ROIs);
+                n = a.autoROI(50, false, 1, 1:6);
+                want(n == 6, 'one threshold ROI per slice was expected');
+                new = a.ROIs(n0+1:end);
+                want(isequal(sort([new.Frame]), sub2ind([6 9], 1:6, repmat(6, 1, 6))), ...
+                    'the ROIs are not on the slices at the b-value on screen');
+                want(all([new.Name] == "thr>=50"), 'the slices should share one name');
+                want(size(unique(vertcat(new.Color), 'rows'), 1) == 1, ...
+                    'the slices should share one colour');
+                f = sub2ind([6 9], 3, 6);
+                want(isequal(new([new.Frame] == f).Mask, a.imageAt(1, f) >= 50), ...
+                    'each slice should be thresholded on its own image');
+                a.ROIs(n0+1:end) = [];
+
+                n = a.autoROI(50, true);
+                want(n == 1 && a.ROIs(end).Frame == a.Frame && ...
+                    a.ROIs(end).Name == "thr<=50", 'the single-frame threshold changed');
+                a.ROIs(end) = [];
+                a.refreshAll();
+            end
+
+            function tImportVolume()
+                a.gotoFrame(sub2ind([6 9], 1, 7));
+                n0 = numel(a.ROIs);
+                m = false(48, 52, 6); m(10:20, 10:20, [2 3 5]) = true;
+                n = a.importROIData(m, "vol");
+                want(n == 3, 'one ROI per non-empty slice was expected');
+                new = a.ROIs(n0+1:end);
+                want(isequal(sort([new.Frame]), sub2ind([6 9], [2 3 5], [7 7 7])), ...
+                    'a slice stack should land on the slices at the b-value on screen');
+                want(all([new.Name] == "vol"), 'the name should not carry a slice number');
+                want(size(unique(vertcat(new.Color), 'rows'), 1) == 1, ...
+                    'the slices should share one colour');
+                a.ROIs(n0+1:end) = [];
+
+                m4 = false(48, 52, 6, 9); m4(5:8, 5:8, 4, 8) = true;
+                n = a.importROIData(m4, "full");
+                want(n == 1 && a.ROIs(end).Frame == sub2ind([6 9], 4, 8), ...
+                    'a stack with every frame should map plane to frame');
+                a.ROIs(end) = [];
+
+                n0 = numel(a.ROIs);
+                n = a.importROIData(true(40, 52, 6), "wrong");
+                want(n == 0 && numel(a.ROIs) == n0, 'a mask of the wrong size must be refused');
+                n = a.importROIData(true(48, 52, 5), "wrong");
+                want(n == 0 && numel(a.ROIs) == n0, ...
+                    'a stack matching no dimension must be refused');
+                a.refreshAll();
+            end
+
+            function tMismatchedMask()
+                % A mask that does not fit the image, as an older import could
+                % store, must not stop every later refresh.
+                a.gotoFrame(43);
+                a.deleteFrameROIs();
+                good = false(48, 52); good(5:9, 5:9) = true;
+                a.addROIRecord(true(40, 52), [], "mask", "stale", [1 0 0]);
+                a.addROIRecord(good, [], "mask", "fine", [0 1 0]);
+                a.refreshAll();
+                want(isequal(a.getROIMask(true), good), ...
+                    'the union should hold only the mask that fits');
+                a.setPlotPanel(true);
+                a.setPlotMode("roi");
+                a.gotoFrame(44);
+                a.gotoFrame(43);
+                a.setPlotPanel(false);
+                a.deleteFrameROIs();
+            end
+
+            function tParseIndexList()
+                p = @ImageBrowserApp.parseIndexList;
+                want(isequal(p("3", 9), 3), 'a single number was misread');
+                want(isequal(p("2-5", 9), 2:5), 'a dash range was misread');
+                want(isequal(p(" 2 : 5 ", 9), 2:5), 'a colon range was misread');
+                want(isequal(p("[1, 4 6]", 9), [1 4 6]), 'a list was misread');
+                want(isequal(p("All", 4), 1:4), '"all" was misread');
+                want(isequal(p("7-12", 9), 7:9), 'positions out of range should be dropped');
+                want(isempty(p("x", 9)) && isempty(p("", 9)) && isempty(p("-2", 9)), ...
+                    'unreadable input should give nothing');
+            end
+
+            function tZoomPan()
+                ax = a.UI.Axes;
+                view = @() [ax.XLim; ax.YLim];
+                a.resetView();
+                full = view();
+                a.zoomStep(1 / a.ZoomStep);
+                z = view();
+                want(all(diff(z, 1, 2) < diff(full, 1, 2)), 'Zoom in did not enlarge the image');
+                want(norm(mean(z, 2) - mean(full, 2)) < 1e-9, 'Zoom in moved the centre');
+
+                % Grab (20,20) and drag the pointer to (15,17): the view
+                % follows by the same amount.
+                a.PanDrag = struct('Active', true, 'Origin', [20 20]);
+                a.doPan(15, 17);
+                p = view();
+                want(norm(p - (z + [5 5; 3 3])) < 1e-9, 'pan did not follow the drag');
+                a.doPan(-1000, -1000);
+                q = view();
+                want(abs(q(1,2) - full(1,2)) < 1e-9 && abs(q(2,2) - full(2,2)) < 1e-9, ...
+                    'pan should stop at the image edge');
+                want(norm(diff(q, 1, 2) - diff(z, 1, 2)) < 1e-9, 'pan changed the zoom');
+                a.onMouseUp();
+                want(~a.PanDrag.Active, 'releasing the button should end the pan');
+
+                % Zooming out next to an edge slides the view back inside
+                % instead of cutting it, so its shape is kept.
+                a.zoomAbout(q(1,2) - 1, q(2,2) - 1, 1.2);
+                c = view();
+                want(abs(diff(c(1,:)) / diff(c(2,:)) - diff(z(1,:)) / diff(z(2,:))) < 1e-9, ...
+                    'zooming near the edge changed the shape of the view');
+                want(abs(c(1,2) - full(1,2)) < 1e-9 && abs(c(2,2) - full(2,2)) < 1e-9, ...
+                    'the view should stay against the edge');
+
+                for step = 1:20, a.zoomStep(a.ZoomStep); end
+                want(isequal(view(), full), 'zooming out should stop at the whole image');
+                a.zoomStep(1 / a.ZoomStep);
+                a.resetView();
+                want(isequal(view(), full), 'Fit should show the whole image');
+
+                a.onKey(struct('Key', 'control', 'Modifier', {{'control'}}));
+                want(a.ModCtrl, 'holding Ctrl should be noticed');
+                a.onKeyRelease(struct('Key', 'control', 'Modifier', {{}}));
+                want(~a.ModCtrl, 'releasing Ctrl should return the wheel to frame stepping');
+            end
+
+            function tContrastKeys()
+                key = @(k, c) a.onKey(struct('Key', k, 'Character', c, 'Modifier', {{}}));
+                a.CLim = [10 20];
+                key('hyphen', '-');
+                want(diff(a.CLim) > 10, 'the - key should lower the contrast');
+                a.CLim = [10 20];
+                key('equal', '=');
+                want(diff(a.CLim) < 10, 'the = key should raise the contrast');
+                a.CLim = [10 20];
+                key('unknown', '+');            % whatever a layout calls its + key
+                want(diff(a.CLim) < 10, 'a typed + should raise the contrast');
+                a.setCLimMode("minmax");
+            end
+
+            function tSplitters()
+                drawnow;
+                p = getpixelposition(a.UI.SplitSide, true);
+                want(a.splitterAt(p(1:2) + p(3:4) / 2) == "side", ...
+                    'the divider is not found under the pointer');
+                want(a.splitterAt([p(1) - 50, p(2) + p(4) / 2]) == "", ...
+                    'a point beside the divider should not count as on it');
+
+                w0 = a.SidebarW;
+                a.startSplit("side", [500 300], 'normal');
+                want(a.SplitDrag.Active, 'pressing on the divider should start a drag');
+                a.doSplitDrag([440 300]);
+                want(a.UI.Root.ColumnWidth{3} == w0 + 60, 'dragging left should widen the sidebar');
+                a.doSplitDrag([-5000 300]);
+                want(a.SidebarW == a.SplitDrag.Limits(2) && a.SidebarW > w0, ...
+                    'the sidebar should stop where the image would become too narrow');
+                a.doSplitDrag([5000 300]);
+                want(a.SidebarW == a.MinSidebar, 'the sidebar should stop at its minimum');
+                a.onMouseUp();
+                want(~a.SplitDrag.Active, 'releasing the button should end the drag');
+                a.startSplit("side", [500 300], 'open');
+                want(a.UI.Root.ColumnWidth{3} == a.SidebarWidth, ...
+                    'a double-click should restore the sidebar');
+
+                a.setPlotPanel(true);
+                drawnow;
+                h0 = a.PlotH;
+                a.startSplit("plot", [300 200], 'normal');
+                a.doSplitDrag([300 240]);
+                want(a.UI.Left.RowHeight{6} == h0 + 40, 'dragging up should enlarge the plot');
+                a.onMouseUp();
+                a.setPlotPanel(false);
+                want(a.UI.Left.RowHeight{6} == 0, 'closing the plot should free its row');
+                a.setPlotPanel(true);
+                want(a.UI.Left.RowHeight{6} == h0 + 40, 'reopening the plot should keep its size');
+                a.startSplit("plot", [300 200], 'open');
+                want(a.UI.Left.RowHeight{6} == a.PlotHeight, ...
+                    'a double-click should restore the plot height');
+                a.setPlotPanel(false);
             end
 
             function tRenameRedraws()
@@ -4296,16 +4754,30 @@ classdef ImageBrowserApp < handle
         end
 
         function onMouseMove(app)
-            if app.Closing || app.seriesCount() == 0, return; end
+            if app.Closing, return; end
+            if app.SplitDrag.Active
+                app.doSplitDrag(app.UI.Fig.CurrentPoint);
+                return
+            end
+            if app.seriesCount() == 0, return; end
             [inside, x, y] = app.axesPoint();
 
             if app.WLDrag.Active
                 app.doWLDrag(x, y);
                 return
             end
+            if app.PanDrag.Active
+                app.doPan(x, y);
+                return
+            end
 
             if ~inside
-                app.UI.Fig.Pointer = 'arrow';
+                % Resize arrows over a divider, so it can be found.
+                switch app.splitterAt(app.UI.Fig.CurrentPoint)
+                    case "side", app.UI.Fig.Pointer = 'left';
+                    case "plot", app.UI.Fig.Pointer = 'top';
+                    otherwise,   app.UI.Fig.Pointer = 'arrow';
+                end
                 return
             end
             app.UI.Fig.Pointer = 'crosshair';
@@ -4327,7 +4799,17 @@ classdef ImageBrowserApp < handle
         end
 
         function onMouseDown(app, ~)
-            if app.Closing || app.seriesCount() == 0, return; end
+            if app.Closing, return; end
+            % The dividers also start a drag from their own ButtonDownFcn;
+            % this catches the press should that not fire. Starting twice is
+            % harmless.
+            cp = app.UI.Fig.CurrentPoint;
+            which = app.splitterAt(cp);
+            if which ~= ""
+                app.startSplit(which, cp, app.UI.Fig.SelectionType);
+                return
+            end
+            if app.seriesCount() == 0, return; end
             [inside, x, y] = app.axesPoint();
             if ~inside, return; end
             sel = app.UI.Fig.SelectionType;
@@ -4337,6 +4819,13 @@ classdef ImageBrowserApp < handle
                 app.WLDrag.Origin = [x y];
                 app.WLDrag.CLim = app.activeCLim();
                 app.UI.Fig.Pointer = 'fleur';
+                return
+            end
+
+            if strcmp(sel, 'extend')       % middle button or Shift+click: pan
+                app.PanDrag.Active = true;
+                app.PanDrag.Origin = [x y];
+                app.UI.Fig.Pointer = 'hand';
                 return
             end
 
@@ -4359,10 +4848,104 @@ classdef ImageBrowserApp < handle
         end
 
         function onMouseUp(app)
-            if app.WLDrag.Active
+            app.SplitDrag.Active = false;
+            if app.WLDrag.Active || app.PanDrag.Active
                 app.WLDrag.Active = false;
+                app.PanDrag.Active = false;
                 app.UI.Fig.Pointer = 'crosshair';
             end
+        end
+
+        %------------------------------------------------------------------
+        % Pane dividers
+        %------------------------------------------------------------------
+        function which = splitterAt(app, cp)
+            %SPLITTERAT  The divider under figure point CP (pixels), or "".
+            which = "";
+            names = ["side" "plot"];
+            hs = {app.UI.SplitSide, app.UI.SplitPlot};
+            for i = 1:2
+                h = hs{i};
+                if ~isvalid(h) || ~logical(h.Visible), continue; end
+                p = getpixelposition(h, true);
+                if p(3) > 0 && p(4) > 0 && cp(1) >= p(1) && cp(1) <= p(1) + p(3) && ...
+                        cp(2) >= p(2) && cp(2) <= p(2) + p(4)
+                    which = names(i);
+                    return
+                end
+            end
+        end
+
+        function startSplit(app, which, cp, selType)
+            % While a ROI is being drawn the window callbacks are suspended,
+            % so a drag started now would never see the button go up.
+            if isempty(app.UI.Fig.WindowButtonUpFcn), return; end
+            if strcmp(selType, 'open')            % double-click: reset
+                app.SplitDrag.Active = false;
+                if which == "side"
+                    app.setSidebarWidth(app.SidebarWidth);
+                else
+                    app.setPlotHeight(app.PlotHeight);
+                end
+                return
+            end
+            % The image gives up room, never below a minimum; how much it
+            % has is measured once, here, because the layout catches up with
+            % each change only after the event.
+            if which == "side"
+                start = app.SidebarW;
+                p = getpixelposition(app.UI.Left, true);
+                room = p(3) - app.MinImageW;
+                lo = app.MinSidebar;
+            else
+                start = app.PlotH;
+                p = getpixelposition(app.UI.Axes, true);
+                room = p(4) - app.MinImageH;
+                lo = app.MinPlot;
+            end
+            app.SplitDrag = struct('Active', true, 'Which', which, ...
+                'Origin', cp(1:2), 'Start', start, ...
+                'Limits', [min(lo, start), max(start, start + room)]);
+        end
+
+        function doSplitDrag(app, cp)
+            d = cp(1:2) - app.SplitDrag.Origin;
+            if app.SplitDrag.Which == "side"
+                v = app.SplitDrag.Start - d(1);      % dragging left widens the sidebar
+            else
+                v = app.SplitDrag.Start + d(2);      % dragging up raises the plot
+            end
+            v = round(min(max(v, app.SplitDrag.Limits(1)), app.SplitDrag.Limits(2)));
+            if app.SplitDrag.Which == "side"
+                app.setSidebarWidth(v);
+            else
+                app.setPlotHeight(v);
+            end
+        end
+
+        function setSidebarWidth(app, w)
+            app.SidebarW = w;
+            cw = app.UI.Root.ColumnWidth;
+            cw{3} = w;
+            app.UI.Root.ColumnWidth = cw;
+        end
+
+        function setPlotHeight(app, h)
+            app.PlotH = h;
+            if logical(app.UI.PlotPanel.Visible)
+                rh = app.UI.Left.RowHeight;
+                rh{6} = h;
+                app.UI.Left.RowHeight = rh;
+            end
+        end
+
+        function doPan(app, x, y)
+            %DOPAN  Keep the grabbed image point under the pointer. The
+            %   pointer position arrives in the limits as they are now, so
+            %   shifting them by the difference puts the grabbed point back.
+            d = app.PanDrag.Origin - [x y];
+            ax = app.UI.Axes;
+            app.setView(ax.XLim + d(1), ax.YLim + d(2));
         end
 
         function doWLDrag(app, x, y)
@@ -4398,17 +4981,19 @@ classdef ImageBrowserApp < handle
             [inside, x, y] = app.axesPoint();
             if ~inside, return; end
             n = e.VerticalScrollCount;
-            if app.ModCtrl || app.hasModifier('control')
+            % Command is the Mac counterpart: there Ctrl + scroll is usually
+            % taken by the system's own screen zoom and never arrives.
+            if app.ModCtrl || app.hasModifier(["control" "command"])
                 app.zoomAbout(x, y, 1.15 ^ n);
             else
                 app.stepFrame(sign(n));
             end
         end
 
-        function tf = hasModifier(app, name)
+        function tf = hasModifier(app, names)
             tf = false;
             try
-                tf = any(strcmp(app.UI.Fig.CurrentModifier, name));
+                tf = any(ismember(app.UI.Fig.CurrentModifier, names));
             catch
                 % CurrentModifier is not available on every release.
             end
@@ -4416,16 +5001,28 @@ classdef ImageBrowserApp < handle
 
         function zoomAbout(app, x, y, factor)
             ax = app.UI.Axes;
-            xl = ax.XLim; yl = ax.YLim;
-            xl = x + (xl - x) * factor;
-            yl = y + (yl - y) * factor;
-            sz = size(app.UI.Image.CData);
-            xl = [max(0.5, xl(1)), min(sz(2) + 0.5, xl(2))];
-            yl = [max(0.5, yl(1)), min(sz(1) + 0.5, yl(2))];
+            xl = x + (ax.XLim - x) * factor;
+            yl = y + (ax.YLim - y) * factor;
             if diff(xl) > 1 && diff(yl) > 1
-                ax.XLim = xl;
-                ax.YLim = yl;
+                app.setView(xl, yl);
             end
+        end
+
+        function zoomStep(app, factor)
+            %ZOOMSTEP  Zoom about the centre of the current view; a FACTOR
+            %   below 1 enlarges the image.
+            ax = app.UI.Axes;
+            app.zoomAbout(mean(ax.XLim), mean(ax.YLim), factor);
+        end
+
+        function setView(app, xl, yl)
+            %SETVIEW  Show the given part of the image. A view running off
+            %   an edge is slid back inside rather than cut, because cutting it
+            %   changes its shape and the image is drawn smaller to keep
+            %   square pixels. No span exceeds the whole image.
+            sz = size(app.UI.Image.CData);
+            app.UI.Axes.XLim = ImageBrowserApp.slideInside(xl, [0.5, sz(2) + 0.5]);
+            app.UI.Axes.YLim = ImageBrowserApp.slideInside(yl, [0.5, sz(1) + 0.5]);
         end
 
         function tf = typingInControl(app)
@@ -4438,8 +5035,18 @@ classdef ImageBrowserApp < handle
             end
         end
 
+        function onKeyRelease(app, e)
+            % Without this, one press of Ctrl left the wheel zooming instead
+            % of stepping frames until some other key came along.
+            if any(strcmp(e.Key, {'control', 'command'}))
+                app.ModCtrl = false;
+            else
+                app.ModCtrl = any(ismember(e.Modifier, {'control', 'command'}));
+            end
+        end
+
         function onKey(app, e)
-            app.ModCtrl = any(strcmp(e.Modifier, 'control'));
+            app.ModCtrl = any(ismember(e.Modifier, {'control', 'command'}));
             if app.typingInControl()
                 % A table cell, edit field, spinner, dropdown or list has
                 % focus. Its own keys must reach it: an arrow key while
@@ -4447,7 +5054,14 @@ classdef ImageBrowserApp < handle
                 % table under the open editor left the cell stuck.
                 return
             end
-            switch lower(e.Key)
+            key = lower(e.Key);
+            % For + and - the character typed decides, whatever the keyboard
+            % layout calls the key that produced it.
+            if isfield(e, 'Character') || isprop(e, 'Character')
+                if isequal(e.Character, '+'), key = 'add'; end
+                if isequal(e.Character, '-'), key = 'subtract'; end
+            end
+            switch key
                 case 'rightarrow', app.stepFrame(1);
                 case 'leftarrow',  app.stepFrame(-1);
                 case 'pagedown',   app.stepFrame(10);
@@ -4462,9 +5076,9 @@ classdef ImageBrowserApp < handle
                 case 'l', app.toggleCLimLock();
                 case 'r', app.resetCLim();
                 case 'm', app.toggleMontage();
-                case {'add', 'equal', 'hyphen'}
+                case {'add', 'equal', 'plus'}
                     app.adjustWL(0, 10);
-                case {'subtract', 'minus'}
+                case {'subtract', 'minus', 'hyphen'}
                     app.adjustWL(0, -10);
                 case 'escape'
                     app.stopCine();
